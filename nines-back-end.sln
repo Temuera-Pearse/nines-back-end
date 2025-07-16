@@ -1,0 +1,24 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Nines.Backend", "Nines.Backend.csproj", "{BBE0271E-0553-39B5-E9A4-93740292091C}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{BBE0271E-0553-39B5-E9A4-93740292091C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BBE0271E-0553-39B5-E9A4-93740292091C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BBE0271E-0553-39B5-E9A4-93740292091C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BBE0271E-0553-39B5-E9A4-93740292091C}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {C7A6F24B-0BCA-4CF9-B376-E6C25B1D2B55}
+	EndGlobalSection
+EndGlobal

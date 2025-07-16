@@ -1,0 +1,158 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Nines.BackEnd</name>
+    </assembly>
+    <members>
+        <member name="T:Nines.BackEnd.Config.AppSettings">
+            <summary>
+            Binds to the "AppSettings" section in appsettings.json.
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.Config.AppSettings.DefaultRaceDurationSeconds">
+            <summary>
+            How many seconds each race should run.
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.Config.AppSettings.ResultScreenDurationSeconds">
+            <summary>
+            How long (in seconds) to show results after a race completes.
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.Domains.Entities.Horse.Odds">
+            <summary>
+            The odds for this horse—can be recalculated on the entity if you like.
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.Domains.Entities.Horse.DistanceTravelled">
+            <summary>
+            Distance traveled in the current simulation (meters).
+            </summary>
+        </member>
+        <member name="M:Nines.BackEnd.Domains.Entities.Horse.Run(System.Double)">
+            <summary>
+            Simulates this horse running for the given seconds.
+            Updates <see cref="P:Nines.BackEnd.Domains.Entities.Horse.DistanceTravelled"/>.
+            </summary>
+        </member>
+        <member name="M:Nines.BackEnd.Domains.Repositories.IRaceRepository.CreateNextRaceAsync">
+            <summary>Creates the next race scheduled at the upcoming :30 mark.</summary>
+        </member>
+        <member name="M:Nines.BackEnd.Domains.Repositories.IRaceRepository.CloseCurrentRaceAsync">
+            <summary>Closes bets on the race that’s currently OpenForBetting.</summary>
+        </member>
+        <member name="M:Nines.BackEnd.Domains.Repositories.IRaceRepository.StartCurrentRaceAsync">
+            <summary>Marks the race that’s BettingClosed as InProgress.</summary>
+        </member>
+        <member name="M:Nines.BackEnd.Domains.Repositories.IRaceRepository.RunCurrentRaceAsync">
+            <summary>Runs the InProgress race: simulates finish, picks winner, sets Completed.</summary>
+        </member>
+        <member name="M:Nines.BackEnd.Domains.Repositories.IRaceRepository.ResetForNextCycleAsync">
+            <summary>Clears out any Completed races so new ones can be created.</summary>
+        </member>
+        <member name="T:Nines.BackEnd.DTOs.HorseSummaryDto">
+            <summary>
+            A slimmed-down view of a Horse for API responses.
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.DTOs.HorseSummaryDto.Id">
+            <summary>
+            The unique ID of the horse.
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.DTOs.HorseSummaryDto.Name">
+            <summary>
+            The horse’s display name.
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.DTOs.HorseSummaryDto.Odds">
+            <summary>
+            The current odds for this horse.
+            </summary>
+        </member>
+        <member name="T:Nines.BackEnd.DTOs.RaceDto">
+            <summary>
+            A Data Transfer Object representing a Race in API responses.
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.DTOs.RaceDto.Id">
+            <summary>
+            The unique ID of the race.
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.DTOs.RaceDto.StartTime">
+            <summary>
+            When the race is scheduled to start (UTC).
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.DTOs.RaceDto.Status">
+            <summary>
+            The current status (Scheduled, InProgress, Completed).
+            </summary>
+        </member>
+        <member name="P:Nines.BackEnd.DTOs.RaceDto.Horses">
+            <summary>
+            The list of competing horses (id, name, odds).
+            </summary>
+        </member>
+        <member name="T:Nines.BackEnd.Gateways.ExchangeGateway">
+            <summary>
+            A simple HttpClient‐based gateway. Replace the URLs and payloads with your actual API.
+            </summary>
+        </member>
+        <member name="T:Nines.BackEnd.Gateways.IExchangeGateway">
+            <summary>
+            Abstraction for any external exchange or payment API.
+            </summary>
+        </member>
+        <member name="M:Nines.BackEnd.Gateways.IExchangeGateway.GetExchangeRateAsync(System.String,System.String)">
+            <summary>
+            Retrieves the current exchange rate from one currency to another.
+            </summary>
+        </member>
+        <member name="M:Nines.BackEnd.Gateways.IExchangeGateway.ExecuteConversionAsync(System.String,System.String,System.Decimal)">
+            <summary>
+            Executes a currency conversion or place‐bet operation.
+            Returns true if successful.
+            </summary>
+        </member>
+        <member name="M:Nines.BackEnd.Handlers.WebAPI.RaceController.GetNextRace">
+            <summary>
+            GET api/race/next
+            Returns the very next scheduled race.
+            </summary>
+        </member>
+        <member name="M:Nines.BackEnd.Handlers.WebAPI.RaceController.GetById(System.Int32)">
+            <summary>
+            GET api/race/{id}
+            Looks up a race by its integer ID.
+            </summary>
+        </member>
+        <member name="M:Nines.BackEnd.Handlers.WebAPI.RaceController.GetAllUpcoming">
+            <summary>
+            GET api/race
+            Lists all upcoming races.
+            </summary>
+        </member>
+        <member name="T:Nines.BackEnd.Services.IRaceService">
+            <summary>
+            Contracts for querying Race data and projecting it into DTOs.
+            </summary>
+        </member>
+        <member name="T:Nines.BackEnd.Services.RaceService">
+            <summary>
+            Implements IRaceService by calling into the IRaceRepository
+            and mapping domain Races → RaceDto.
+            </summary>
+        </member>
+        <member name="M:Nines.BackEnd.Services.RaceService.OpenBetsAsync">
+            <summary>Called every minute at :00 to open bets.</summary>
+        </member>
+        <member name="M:Nines.BackEnd.Services.RaceService.CloseBetsAsync">
+            <summary>Called every minute at :27 to close bets.</summary>
+        </member>
+        <member name="M:Nines.BackEnd.Services.RaceService.ResetRaceAsync">
+            <summary>Called every minute at :59 to reset for the next cycle.</summary>
+        </member>
+    </members>
+</doc>
