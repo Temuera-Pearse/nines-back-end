@@ -39,6 +39,7 @@ export interface Race {
   isActive: boolean
   winner?: Horse
   placements: Horse[]
+  lastBroadcastedTick: number
 }
 
 /**
@@ -81,9 +82,18 @@ export interface PrecomputedRace {
   horses: HorseSeed[]
   ticks: PrecomputedTick[]
   finishLine: number
+  /** Optional lineage for deterministic replay */
+  seedInt?: number
   winnerId: string
   finishOrder: string[]
   finishTimesMs: Record<string, number>
+  /** New: exact tick index at which each horse crosses the finish (floor of crossingMs/dtMs) */
+  finishTickIndex: Record<string, number>
   startTime?: Date
   endTime?: Date
+  checksum?: string
+  /** Canonical event timeline used by all consumers */
+  eventTimeline?: import('./events/timeline.js').EventTimeline
+  /** Canonical final horse state matrix (after applying all event effects) */
+  finalHorseStateMatrix?: import('./events/effects.js').FinalHorseStateMatrix
 }

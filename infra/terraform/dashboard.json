@@ -1,0 +1,22 @@
+{
+  "widgets": [
+    {
+      "type": "metric",
+      "x": 0,
+      "y": 0,
+      "width": 12,
+      "height": 6,
+      "properties": {
+        "metrics": [
+          ["${cw_namespace}", "ws_clients"],
+          ["${cw_namespace}", "tick_rate"],
+          ["${cw_namespace}", "ws_dropped_tick_frames"]
+        ],
+        "period": 60,
+        "stat": "Average",
+        "region": "${region}",
+        "title": "WS Clients / Tick Rate / Drops"
+      }
+    }
+  ]
+}

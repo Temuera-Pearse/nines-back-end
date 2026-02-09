@@ -1,5 +1,7 @@
 import { PrecomputedRace, Race } from './raceTypes.js'
+import { RaceStateMachine } from './stateMachine.js'
 
+import { hashStringToInt } from './rng.js'
 const ts = () => new Date().toISOString()
 
 /**
@@ -71,7 +73,7 @@ export const Log = {
     console.log(
       `${fmt('WS')} WebSocket ready${
         clientCount !== undefined ? ` (clients=${clientCount})` : ''
-      }`
+      }`,
     )
   },
   raceScheduled(args: RaceScheduleArgs) {
@@ -93,7 +95,7 @@ export const Log = {
           dtMs,
           seed,
           winnerId: winnerId ?? null,
-        })
+        }),
     )
   },
   countdown({ raceId, tMinusSec }: CountdownArgs) {
@@ -118,8 +120,8 @@ export const Log = {
     console.log(
       `${fmt(
         'PRECOMPUTE',
-        raceId
-      )} tickCount=${tickCount} projectedWinner=${projectedWinnerId}`
+        raceId,
+      )} tickCount=${tickCount} projectedWinner=${projectedWinnerId}`,
     )
     const serializeTick = (t: TickSummary) => ({
       idx: t.index,
@@ -128,11 +130,11 @@ export const Log = {
     })
     console.log(
       `${fmt('PRECOMPUTE', raceId)} first3=` +
-        JSON.stringify(first3.map(serializeTick))
+        JSON.stringify(first3.map(serializeTick)),
     )
     console.log(
       `${fmt('PRECOMPUTE', raceId)} last3=` +
-        JSON.stringify(last3.map(serializeTick))
+        JSON.stringify(last3.map(serializeTick)),
     )
   },
   tickStream({ raceId, tick, broadcastCount }: TickStreamArgs) {
@@ -142,13 +144,13 @@ export const Log = {
       } offsetMs=${tick.timestampOffsetMs} ` +
         `horses=` +
         JSON.stringify(tick.horses) +
-        ` broadcast=${broadcastCount}`
+        ` broadcast=${broadcastCount}`,
     )
   },
   tickSkipped({ raceId, skippedCount, reason }: TickSkippedArgs) {
     console.log(
       `${fmt('TICK-SKIP', raceId)} count=${skippedCount}` +
-        (reason ? ` reason=${reason}` : '')
+        (reason ? ` reason=${reason}` : ''),
     )
   },
   broadcastInfo(raceId: string, count: number) {
@@ -160,8 +162,8 @@ export const Log = {
     console.log(
       `${fmt('DEBUG-VEL', raceId)} idx=${tickIndex} ` +
         JSON.stringify(
-          velocities.map((v) => ({ h: v.horseId, vel: v.velocity }))
-        )
+          velocities.map((v) => ({ h: v.horseId, vel: v.velocity })),
+        ),
     )
   },
   debugSeed({ raceId, seed }: DebugSeedArgs) {
@@ -178,8 +180,8 @@ export const Log = {
     console.log(
       `${fmt(
         'DEBUG-DRIFT',
-        raceId
-      )} idx=${tickIndex} driftMs=${driftMs} correctionMs=${correctionAppliedMs}`
+        raceId,
+      )} idx=${tickIndex} driftMs=${driftMs} correctionMs=${correctionAppliedMs}`,
     )
   },
 }
@@ -192,6 +194,10 @@ export class RaceState {
   private static precomputed: PrecomputedRace | null = null
   private static previousRace: PrecomputedRace | null = null
   private static history: PrecomputedRace[] = []
+  private static stateMachine = new RaceStateMachine()
+  private static currentSeed: string | null = null
+  private static currentSeedInt: number | null = null
+  private static cycleCounter = 0
 
   /**
    * Get the currently running race
@@ -207,11 +213,46 @@ export class RaceState {
     this.currentRace = race
   }
 
+  static getStateMachine(): RaceStateMachine {
+    return this.stateMachine
+  }
+
   static setPrecomputedRace(r: PrecomputedRace | null): void {
     this.precomputed = r
   }
   static getPrecomputedRace(): PrecomputedRace | null {
     return this.precomputed
+  }
+
+  // Seed lifecycle (available during countdown, racing, results; cleared on reset)
+  static setCurrentSeed(seed: string | null): void {
+    this.currentSeed = seed
+    if (seed) {
+      // Compute 32-bit int for RNG determinism
+      this.currentSeedInt = hashStringToInt(seed)
+      Log.debugSeed({ raceId: this.precomputed?.id ?? 'pending', seed })
+    } else {
+      this.currentSeedInt = null
+    }
+  }
+  static getCurrentSeed(): string | null {
+    return this.currentSeed
+  }
+  static getCurrentSeedInt(): number | null {
+    return this.currentSeedInt
+  }
+  static clearCurrentSeed(): void {
+    this.currentSeed = null
+    this.currentSeedInt = null
+  }
+
+  // Cycle counter for deterministic per-cycle seed derivation
+  static bumpCycle(): number {
+    this.cycleCounter += 1
+    return this.cycleCounter
+  }
+  static getCycleCounter(): number {
+    return this.cycleCounter
   }
 
   /**
@@ -227,7 +268,7 @@ export class RaceState {
           ((this.precomputed as any).dtMs &&
           (this.precomputed.ticks?.length ?? 0)
             ? (this.precomputed as any).dtMs * this.precomputed.ticks!.length
-            : this.precomputed.ticks?.length ?? 0),
+            : (this.precomputed.ticks?.length ?? 0)),
       })
       this.previousRace = this.precomputed
       this.history.unshift(this.precomputed)
