@@ -34,6 +34,7 @@ type MetricsSnapshot = Readonly<{
     avgMs: number
     count: number
     phases?: Readonly<Record<string, number>>
+  }>
 }>
 
 class Ring {
@@ -211,7 +212,9 @@ export class EngineMetrics {
         clientCount: this.wsClientCount,
         droppedTickFrames: this.wsDroppedTickFrames,
         avgBufferedAmount: this.wsBufferedRing.stats().avg,
-        latestSeqByRace: Object.freeze(Object.fromEntries(this.latestSeqByRace.entries())),
+        latestSeqByRace: Object.freeze(
+          Object.fromEntries(this.latestSeqByRace.entries()),
+        ),
       }),
       gc: Object.freeze({
         minorCount: this.gcMinor,
@@ -226,7 +229,7 @@ export class EngineMetrics {
         lastMs: this.preLastMs,
         avgMs: this.preCount ? this.preSumMs / this.preCount : 0,
         count: this.preCount,
-        phases: Object.freeze(this.prePhasesLast),
+        phases: Object.freeze({ ...this.prePhasesLast }),
       }),
     }
     return Object.freeze(snap)
@@ -244,6 +247,7 @@ export class EngineMetrics {
     this.preLastMs = 0
     this.preSumMs = 0
     this.preCount = 0
+    this.prePhasesLast = Object.create(null)
     this.events.emit('metrics:reset')
   }
 

@@ -2,6 +2,8 @@ import { EventEmitter } from 'events'
 import { RaceState } from './raceState.js'
 import { activeRaces, TICK_MS } from './activeRaceMemory.js'
 import { seedPrecomputedRace, startPrecomputedRace } from './raceEngine.js'
+import { randomBytes } from 'crypto'
+import { releaseRace } from './cleanup.js'
 
 export type RacePhase =
   | 'idle'
@@ -39,9 +41,31 @@ const SECS = {
 
 type Subscriber = (phase: RacePhase, second: number, data?: any) => void
 
+function nextSeedString(cycleId: number): string {
+  // Deterministic engine: same seed => same race.
+  // This function controls *seed generation*, not determinism of the engine itself.
+  const fixed = process.env.FIXED_SEED
+  if (fixed && fixed.trim()) return fixed.trim()
+
+  // Default to random seeds for real gameplay and local dev.
+  // Use deterministic mode for reproducible debugging.
+  const modeEnv = (process.env.SEED_MODE || '').toLowerCase()
+  const isTest = process.env.NODE_ENV === 'test'
+  const mode: 'random' | 'deterministic' =
+    isTest || modeEnv === 'deterministic' ? 'deterministic' : 'random'
+
+  if (mode === 'deterministic') return `cycle-${cycleId}`
+  const nonce = randomBytes(6).toString('hex')
+  return `cycle-${cycleId}-${nonce}`
+}
+
 export class RaceStateMachine {
   state: RacePhase = 'idle'
-  private currentSecond = 0 // 0..59
+  // currentSecond is always snapped to the actual UTC second — no accumulated drift.
+  private currentSecond = new Date().getUTCSeconds()
+  // Deduplicate: track the last UTC second we processed to prevent double-advancing
+  // when the aligned timer fires 1ms early and immediately reschedules.
+  private lastProcessedUTCSec = -1
   private events = new EventEmitter()
 
   transition(next: RacePhase): void {
@@ -82,22 +106,38 @@ export class RaceStateMachine {
   // Advance the cycle by 1 second (call every 1000ms)
   // Emits state changes at boundary seconds and per-second tick data during race_running.
   tick(): void {
-    // Advance second
-    this.currentSecond = (this.currentSecond + 1) % CYCLE_SECONDS
+    // Snap to actual UTC second — eliminates drift from timer jitter.
+    const utcSec = new Date().getUTCSeconds()
+    // Deduplicate: if the aligned timer fires 1ms early then again at the boundary,
+    // ignore the second fire so currentSecond never double-advances.
+    if (utcSec === this.lastProcessedUTCSec) return
+    this.lastProcessedUTCSec = utcSec
+    this.currentSecond = utcSec
 
     // Determine phase by currentSecond and auto-transition as needed
     if (this.inRange(SECS.idleStart, SECS.idleEnd)) {
-      // At 27s move to countdown
-      if (this.currentSecond === SECS.countdownStart && this.state === 'idle') {
-        // Deterministic per-cycle seed: cycle-<n>
+      // Ensure a precomputed race exists early in the cycle so /race/current is available.
+      if (this.currentSecond === SECS.idleStart) {
+        // Force a brand-new race every cycle.
+        // If something went wrong in the prior cycle and a race is still hanging around,
+        // clear it first so we never repeat the exact same race over and over.
+        const existing = RaceState.getPrecomputedRace()
+        if (existing?.id) {
+          try {
+            releaseRace(existing.id)
+          } catch {
+            // best-effort
+          }
+        }
+
         const cycleId = RaceState.bumpCycle()
-        const seedStr = `cycle-${cycleId}`
+        const seedStr = nextSeedString(cycleId)
         RaceState.setCurrentSeed(seedStr)
-        this.transition('countdown')
-        // Precompute race deterministically using single RNG instance
         const seeded = seedPrecomputedRace()
         RaceState.setPrecomputedRace(seeded)
-      } else if (this.state !== 'idle' && this.currentSecond <= SECS.idleEnd) {
+      }
+
+      if (this.state !== 'idle' && this.currentSecond <= SECS.idleEnd) {
         // keep idle only when within range before countdown kicks in
         this.state = 'idle'
         this.events.emit('state', {
@@ -106,9 +146,18 @@ export class RaceStateMachine {
         })
       }
     } else if (this.inRange(SECS.countdownStart, SECS.countdownEnd)) {
-      if (this.state !== 'countdown') {
-        this.transition('countdown')
+      // Safety: if booted mid-cycle and no precomputed race exists yet, seed now.
+      if (this.currentSecond === SECS.countdownStart) {
+        const existing = RaceState.getPrecomputedRace()
+        if (!existing) {
+          const cycleId = RaceState.bumpCycle()
+          const seedStr = nextSeedString(cycleId)
+          RaceState.setCurrentSeed(seedStr)
+          const seeded = seedPrecomputedRace()
+          RaceState.setPrecomputedRace(seeded)
+        }
       }
+      if (this.state !== 'countdown') this.transition('countdown')
       // Countdown emits 3→2→1 for front-end convenience
       const tMinus = SECS.raceStart - this.currentSecond
       this.events.emit('tick', {
@@ -197,7 +246,7 @@ export class RaceStateMachine {
         this.transition('idle')
         // Clear seed on reset for next cycle
         RaceState.clearCurrentSeed()
-        this.currentSecond = -1
+        // currentSecond will snap to 0 on the next UTC :00 tick automatically
       }
     }
   }

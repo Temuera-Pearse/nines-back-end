@@ -16,7 +16,9 @@ export function releaseRace(raceId: string): void {
     }
     const pre = RaceState.getPrecomputedRace()
     if (pre?.id === raceId) {
-      RaceState.setPrecomputedRace(null)
+      // completeRace() archives to history, updates previousRace, and clears
+      // both precomputed and currentRace in one step.
+      RaceState.completeRace()
     }
     logEvent('cleanup:released', { raceId })
   } catch (e: any) {

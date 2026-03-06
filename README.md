@@ -183,6 +183,10 @@ Tip: You can use curl or your browser to inspect these endpoints.
 - Race duration is ~20s by default (configurable).
 - Environment:
   - `LOG_VERBOSE=true` for extra logging (optional).
+  - Seed generation (engine remains deterministic per seed):
+    - `SEED_MODE=random` (default) generates a fresh seed each cycle.
+    - `SEED_MODE=deterministic` uses `cycle-<n>` seeds (repeatable across restarts).
+    - `FIXED_SEED=...` forces an exact seed string (always repeats the same race).
 
 ## Developing Locally
 

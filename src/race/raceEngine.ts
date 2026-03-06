@@ -46,6 +46,11 @@ let lastStreamedIndex: number | null = null
 let consecutiveTickFailures = 0
 const persistence = new FileRacePersistence()
 
+// Pre-allocated positions buffer — reused every tick to avoid per-tick GC pressure.
+// Safe because RaceWebSocketServer.broadcast() is synchronous and JSON.stringify
+// captures all values before this buffer is overwritten by the next tick.
+const _posBuffer: number[] = []
+
 function persistCompletedRace(pre: PrecomputedRace): void {
   try {
     if (!pre.finalHorseStateMatrix || !pre.eventTimeline) {
@@ -460,6 +465,20 @@ export function seedPrecomputedRace(): PrecomputedRace {
     winnerId,
   })
 
+  // Notify all connected clients about the new race so they update without
+  // needing to reconnect. Safe to call with zero clients.
+  try {
+    RaceWebSocketServer.broadcast({
+      type: 'race:info',
+      raceId: precomputed!.id,
+      horseOrder: precomputed!.horses.map((h) => h.id),
+      config: precomputed!.config,
+      currentTickIndex: -1,
+    })
+  } catch {
+    // non-fatal: clients will receive race:info on next reconnect
+  }
+
   return precomputed!
 }
 
@@ -469,10 +488,7 @@ export function seedPrecomputedRace(): PrecomputedRace {
  * - Emits a 'race:start' WebSocket message with initial horse info.
  * - Returns the same PrecomputedRace with startTime stamped.
  */
-const DETERMINISTIC_CYCLE_START_MS = 30000
-export function startPrecomputedRace(
-  startTime = new Date(DETERMINISTIC_CYCLE_START_MS),
-): PrecomputedRace {
+export function startPrecomputedRace(startTime = new Date()): PrecomputedRace {
   const sm = RaceState.getStateMachine()
   // Before starting: must be in "race_starting"
   if (!sm.is('race_starting')) {
@@ -507,10 +523,33 @@ export function startPrecomputedRace(
     lastBroadcastedTick: -1,
   }
 
+  // Mirror runtime state into RaceState for API/introspection.
+  try {
+    RaceState.setCurrentRace(currentRace)
+    RaceState.setPrecomputedRace(precomputed)
+  } catch {
+    // non-fatal
+  }
+
   RaceWebSocketServer.broadcast({
     type: 'race:start',
-    data: { raceId: precomputed.id, horses: currentRace.horses },
+    timestampUtc: startTime.toISOString(),
+    raceId: precomputed.id,
+    horseOrder: currentRace.horses.map((h) => h.id),
+    horses: currentRace.horses.map((h) => ({ id: h.id, name: h.name })),
   })
+
+  // Mark as active for catch-up consumers
+  try {
+    const rec = activeRaces.get(precomputed.id)
+    if (rec) {
+      rec.startTime = startTime.getTime()
+      rec.currentTickIndex = -1
+      activeRaces.set(precomputed.id, rec)
+    }
+  } catch {
+    // non-fatal
+  }
   return precomputed
 }
 
@@ -518,7 +557,7 @@ export function startPrecomputedRace(
 function broadcastTickSafe(
   runtimeRace: Race,
   tickIndex: number,
-  updates: PositionUpdate[],
+  updates: ReadonlyArray<{ horseId: string; position: number }>,
 ) {
   if (tickIndex <= runtimeRace.lastBroadcastedTick) {
     log(
@@ -538,11 +577,54 @@ function broadcastTickSafe(
       }, now=${tickIndex})`,
     )
   }
+  // Contract: positions[] is ordered by horseOrder (from race:start).
+  // Write directly into the pre-allocated module-level buffer — no Map, no array alloc.
+  const horses = runtimeRace.horses
+  const n = horses.length
+  if (_posBuffer.length !== n) _posBuffer.length = n
+  // Seed with each horse's last known position as fallback
+  for (let i = 0; i < n; i++) _posBuffer[i] = horses[i].position
+  // Overwrite with incoming state (O(n²) but n=10, cheaper than Map creation)
+  for (const s of updates) {
+    for (let i = 0; i < n; i++) {
+      if (horses[i].id === s.horseId) {
+        _posBuffer[i] = s.position
+        break
+      }
+    }
+  }
+
   RaceWebSocketServer.broadcast({
     type: 'race:tick',
-    data: updates,
+    raceId: runtimeRace.id,
+    data: {
+      raceId: runtimeRace.id,
+      tickIndex,
+      positions: _posBuffer,
+    },
   })
   runtimeRace.lastBroadcastedTick = tickIndex
+}
+
+/**
+ * Derive finish order from canonical (event-modified) crossing times so that
+ * the declared result matches what clients visually observed on screen.
+ */
+function deriveCanonicalFinishOrder(pre: PrecomputedRace): string[] {
+  const allIds = pre.horses.map((h) => h.id)
+  const timesMs = pre.finishTimesMs as Record<string, number>
+  // Final positions from canonical matrix for tie-breaking non-finishers
+  const lastTick =
+    pre.finalHorseStateMatrix?.[(pre.finalHorseStateMatrix?.length ?? 1) - 1]
+  const posMap = new Map<string, number>(
+    (lastTick ?? []).map((s) => [s.horseId, s.position]),
+  )
+  return [...allIds].sort((a, b) => {
+    const ta = timesMs[a] ?? Infinity
+    const tb = timesMs[b] ?? Infinity
+    if (ta !== tb) return ta - tb
+    return (posMap.get(b) ?? 0) - (posMap.get(a) ?? 0)
+  })
 }
 
 /**
@@ -613,21 +695,38 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
     sm.transition('race_finished')
 
     currentRace.isActive = false
-    currentRace.placements = precomputed.finishOrder.map((id) => {
-      const h = currentRace!.horses.find((hh) => hh.id === id)!
-      return h
-    })
-    currentRace.winner = currentRace.placements[0]
+    // Use canonical (event-modified) finish order so the declared result
+    // matches what clients observed on screen.
+    const canonicalOrder = deriveCanonicalFinishOrder(precomputed)
+    currentRace.placements = canonicalOrder
+      .map((id) => {
+        const h = currentRace!.horses.find((hh) => hh.id === id)
+        if (!h) {
+          log(
+            `[${ts()}][RACE][${precomputed!.id}] WARNING: horse ${id} not in currentRace.horses; skipping`,
+          )
+        }
+        return h
+      })
+      .filter((h): h is Horse => h !== undefined)
+    currentRace.winner =
+      currentRace.horses.find((h) => h.id === precomputed!.winnerId) ??
+      currentRace.placements[0]
     precomputed.endTime = now
 
-    log(`[${ts()}][RACE][${precomputed.id}] Race finished. Winner=${winnerId}`)
+    log(
+      `[${ts()}][RACE][${precomputed.id}] Race finished. Winner=${currentRace.winner!.id}`,
+    )
 
     // Persist canonical artifacts
     persistCompletedRace(precomputed)
 
     RaceWebSocketServer.broadcast({
       type: 'race:finish',
-      data: { winner: currentRace.winner!, placements: currentRace.placements },
+      timestampUtc: now.toISOString(),
+      raceId: precomputed.id,
+      winnerId: currentRace.winner!.id,
+      finishOrder: currentRace.placements.map((h) => h.id),
     })
   }
 
@@ -843,14 +942,12 @@ export function streamPrecomputedTickAt(tickIndex: number): PositionUpdate[] {
         1,
     ),
   )
-  const states = precomputed.finalHorseStateMatrix?.[idx]
-  const updates: PositionUpdate[] = (states ?? []).map((s) => ({
-    horseId: s.horseId,
-    position: s.position,
-  }))
+  // Pass states directly — avoids allocating a PositionUpdate[] wrapper array
+  // (10 objects + 1 array) on every tick.
+  const states = precomputed.finalHorseStateMatrix?.[idx] ?? []
 
   // Sequential guard broadcast
-  broadcastTickSafe(currentRace, idx, updates)
+  broadcastTickSafe(currentRace, idx, states)
 
   // Update authoritative current tick for catch-up consumers
   const rec = activeRaces.get(precomputed.id)
@@ -865,11 +962,16 @@ export function streamPrecomputedTickAt(tickIndex: number): PositionUpdate[] {
     (precomputed.finalHorseStateMatrix?.length ?? precomputed.ticks.length) - 1
   if (isLast && currentRace.isActive) {
     currentRace.isActive = false
-    currentRace.placements = precomputed.finishOrder.map((id) => {
-      const h = currentRace!.horses.find((hh) => hh.id === id)!
-      return h
-    })
-    currentRace.winner = currentRace.placements[0]
+    // Use canonical (event-modified) finish order so ALL 10 horses are ranked —
+    // finishers by crossing time, non-finishers by final distance.
+    // This matches what deriveCanonicalFinishOrder produces in streamPrecomputedTicks.
+    const canonicalOrder = deriveCanonicalFinishOrder(precomputed)
+    currentRace.placements = canonicalOrder
+      .map((id) => currentRace!.horses.find((hh) => hh.id === id))
+      .filter((h): h is Horse => h !== undefined)
+    currentRace.winner =
+      currentRace.horses.find((h) => h.id === precomputed!.winnerId) ??
+      currentRace.placements[0]
     if (precomputed.startTime) {
       const endOffset = precomputed.config.durationMs
       precomputed.endTime = new Date(
@@ -882,9 +984,40 @@ export function streamPrecomputedTickAt(tickIndex: number): PositionUpdate[] {
 
     RaceWebSocketServer.broadcast({
       type: 'race:finish',
-      data: { winner: currentRace.winner!, placements: currentRace.placements },
+      timestampUtc: (precomputed.endTime ?? new Date()).toISOString(),
+      raceId: precomputed.id,
+      winnerId: currentRace.winner!.id,
+      finishOrder: currentRace.placements.map((h) => h.id),
     })
+
+    // Clear the live runtime race. Archiving is deferred to releaseRace() at the
+    // cycle boundary so RaceState.getPrecomputedRace() keeps returning this race
+    // (with endTime set) during the :51–:59 results window for late-joiner replay.
+    try {
+      RaceState.setCurrentRace(null)
+    } catch {
+      // non-fatal
+    }
+
+    // Remove from catch-up memory once finished to avoid stale sync
+    // (clients should not request catch-up for completed races).
+    try {
+      activeRaces.delete(precomputed.id)
+    } catch {
+      // non-fatal
+    }
+
+    // Hard reset module-local pointers so the next cycle is guaranteed fresh.
+    // (RaceState history retains the completed race; we only clear live runtime refs.)
+    try {
+      currentRace = null
+      precomputed = null
+      lastStreamedIndex = null
+      consecutiveTickFailures = 0
+    } catch {
+      // non-fatal
+    }
   }
 
-  return updates
+  return []
 }

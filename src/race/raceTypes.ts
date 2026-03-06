@@ -46,9 +46,64 @@ export interface Race {
  * WebSocket message types
  */
 export type WebSocketMessage =
-  | { type: 'race:start'; data: { raceId: string; horses: Horse[] } }
-  | { type: 'race:tick'; data: PositionUpdate[] }
-  | { type: 'race:finish'; data: { winner: Horse; placements: Horse[] } }
+  | {
+      type: 'race:info'
+      protoVer: number
+      raceId: string
+      horseOrder: string[]
+      config: RaceConfig
+      currentTickIndex: number
+    }
+  | {
+      type: 'race:start'
+      protoVer?: number
+      raceId: string
+      timestampUtc: string
+      horseOrder: string[]
+      horses: Array<{ id: string; name: string }>
+    }
+  | {
+      type: 'race:tick' | 'race:keyframe' | 'race:delta'
+      protoVer?: number
+      raceId: string
+      seq?: number
+      tickIndex: number
+      tickTs?: number
+      data: { positions?: number[]; deltas?: number[] }
+      sig?: string
+      keyId?: string
+    }
+  | {
+      type: 'race:finish'
+      protoVer?: number
+      raceId: string
+      timestampUtc: string
+      winnerId: string
+      finishOrder: string[]
+    }
+  | {
+      type: 'race:catchup'
+      protoVer: number
+      raceId: string
+      startIndex: number
+      currentTickIndex: number
+      ticks: Array<{
+        type: 'race:tick'
+        protoVer: number
+        raceId: string
+        seq: number
+        tickIndex: number
+        tickTs: number
+        data: { positions: number[] }
+      }>
+    }
+  | {
+      type: 'race:sync-complete'
+      protoVer: number
+      raceId: string
+      currentTickIndex: number
+    }
+  | { type: 'error'; protoVer: number; message: string }
 
 export interface RaceConfig {
   trackLength: number

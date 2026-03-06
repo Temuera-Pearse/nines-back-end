@@ -10,13 +10,34 @@ export const TICK_RATE = 20
 export const TICK_INTERVAL = 50
 export const DRIFT_TOLERANCE = 5
 
+// Wake up this many ms before the target, then spin with setImmediate for precision.
+// Cost: ~PRESPIN_MS of setImmediate callbacks per tick (negligible CPU at 20Hz).
+const PRESPIN_MS = 4
+
 export const engineEvents = new EventEmitter()
 
 let running = false
 let timerRef: NodeJS.Timeout | null = null
+let immediateRef: NodeJS.Immediate | null = null
 let tickCount = 0
 let lastTickTime: number | null = null
 let nextTickTime: number | null = null
+
+/**
+ * setImmediate spin phase: runs every event-loop turn (~0.1–0.3ms resolution)
+ * until the target time is reached, then fires loop().
+ * This fires in the same event-loop iteration that GC finishes — much tighter
+ * than waiting for the next setTimeout slot.
+ */
+function spinToTarget(): void {
+  if (!running) return
+  if (performance.now() < nextTickTime!) {
+    immediateRef = setImmediate(spinToTarget)
+    return
+  }
+  immediateRef = null
+  loop()
+}
 
 function loop() {
   if (!running) return
@@ -34,20 +55,23 @@ function loop() {
   // Metrics: before tick
   engineMetrics.beforeTick(tickCount)
 
-  // Always emit a tick and stream precomputed positions
-  engineEvents.emit('engineTick', { tick: tickCount, timestamp: Date.now() })
-  try {
-    // Stream by authoritative tick index
-    streamPrecomputedTickAt(tickCount)
-  } catch (e: any) {
-    logEvent('engine:stream-error', { error: e?.message ?? String(e) })
+  // Only stream when the lifecycle is actually running and the race has started.
+  // This prevents noisy errors when the engine is started before a race is seeded.
+  const sm = RaceState.getStateMachine()
+  const pre = RaceState.getPrecomputedRace()
+  if (sm.is('race_running') && pre?.startTime) {
+    try {
+      // Stream by authoritative tick index
+      streamPrecomputedTickAt(tickCount)
+    } catch (e: any) {
+      logEvent('engine:stream-error', { error: e?.message ?? String(e) })
+    }
   }
 
   // Metrics: after tick
   engineMetrics.afterTick(tickCount, drift)
 
   // Stop automatically once last tick is emitted
-  const pre = RaceState.getPrecomputedRace()
   if (pre && tickCount >= pre.ticks.length - 1) {
     stop()
     return
@@ -58,8 +82,17 @@ function loop() {
   nextTickTime += TICK_INTERVAL
   tickCount += 1
 
+  // Early-schedule: sleep until PRESPIN_MS before target, then spin with setImmediate.
+  // This gives sub-millisecond precision vs. raw setTimeout and catches the event loop
+  // immediately after a GC pause ends.
   const delay = Math.max(0, nextTickTime - performance.now())
-  timerRef = setTimeout(loop, delay)
+  if (delay <= PRESPIN_MS) {
+    immediateRef = setImmediate(spinToTarget)
+  } else {
+    timerRef = setTimeout(() => {
+      immediateRef = setImmediate(spinToTarget)
+    }, delay - PRESPIN_MS)
+  }
 }
 
 export function start(): void {
@@ -79,6 +112,10 @@ export function stop(): void {
   if (timerRef) {
     clearTimeout(timerRef)
     timerRef = null
+  }
+  if (immediateRef) {
+    clearImmediate(immediateRef)
+    immediateRef = null
   }
   engineMetrics.stopRace()
   logEvent('engine:stop', { ticksEmitted: tickCount })

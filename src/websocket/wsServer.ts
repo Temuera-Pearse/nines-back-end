@@ -77,18 +77,32 @@ function handleSyncRequest(ws: WebSocket, msg: any) {
 
   const ticksWindow = rec.ticks.slice(startIndex, currentTickIndex + 1)
 
+  const nowMs = Date.now()
+  const tickFrames = ticksWindow.map((t) => ({
+    type: 'race:tick',
+    protoVer: PROTO_VER,
+    raceId,
+    // If seq was captured at broadcast time, use it; otherwise fall back to tickIndex.
+    seq: typeof t.seq === 'number' ? t.seq : t.tickIndex,
+    tickIndex: t.tickIndex,
+    tickTs: typeof t.tickTs === 'number' ? t.tickTs : nowMs,
+    data: { positions: t.positions },
+  }))
+
   ws.send(
     JSON.stringify({
       type: 'race:catchup',
+      protoVer: PROTO_VER,
       raceId,
       startIndex,
-      ticks: ticksWindow,
+      ticks: tickFrames,
       currentTickIndex,
     }),
   )
   ws.send(
     JSON.stringify({
       type: 'race:sync-complete',
+      protoVer: PROTO_VER,
       raceId,
       currentTickIndex,
     }),
@@ -155,11 +169,35 @@ export class RaceWebSocketServer {
         ws.send(
           JSON.stringify({
             type: 'race:info',
+            protoVer: PROTO_VER,
             raceId: pre.id,
+            horseOrder: pre.horses.map((h) => h.id),
             config: pre.config,
             currentTickIndex,
           }),
         )
+
+        // If the race has already finished (client joined during results window),
+        // replay race:finish so they can show the podium without waiting.
+        if (pre.endTime) {
+          const cur = RaceState.getCurrentRace()
+          const winnerId = cur?.winner?.id ?? pre.winnerId
+          const finishOrder =
+            cur?.placements?.map((h) => h.id) ??
+            (pre.finishOrder ? [...pre.finishOrder] : [])
+          if (winnerId && finishOrder.length > 0) {
+            ws.send(
+              JSON.stringify({
+                type: 'race:finish',
+                protoVer: PROTO_VER,
+                raceId: pre.id,
+                timestampUtc: pre.endTime.toISOString(),
+                winnerId,
+                finishOrder,
+              }),
+            )
+          }
+        }
       }
 
       ws.on('message', (data) => {
@@ -220,7 +258,8 @@ export class RaceWebSocketServer {
 
   static broadcast(message: any): void {
     const type = message?.type ?? 'unknown'
-    const raceId =
+    const raceId: string | undefined =
+      message?.raceId ??
       message?.data?.raceId ??
       (Array.isArray(message?.data) ? undefined : message?.data?.id)
     if (LOG_VERBOSE) {
@@ -250,6 +289,34 @@ export class RaceWebSocketServer {
         protoVer: PROTO_VER,
       }
       engineMetrics.setLatestSeq(raceId, currentSeq)
+
+      // Capture sequencing for catch-up consumers (best-effort)
+      try {
+        const positions: number[] | undefined = payloadObj?.data?.positions
+        if (typeof tickIndex === 'number' && Array.isArray(positions)) {
+          const rec = activeRaces.get(raceId)
+          if (rec && Array.isArray(rec.ticks) && rec.ticks[tickIndex]) {
+            rec.ticks[tickIndex].seq = currentSeq
+            rec.ticks[tickIndex].tickTs = nowMs
+            rec.currentTickIndex = Math.max(
+              rec.currentTickIndex ?? -1,
+              tickIndex,
+            )
+            activeRaces.set(raceId, rec)
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+
+    // Ensure protoVer exists on all outgoing JSON frames
+    if (
+      payloadObj &&
+      typeof payloadObj === 'object' &&
+      payloadObj.protoVer === undefined
+    ) {
+      payloadObj = { ...payloadObj, protoVer: PROTO_VER }
     }
 
     // Serialize (without signature) for signing + size

@@ -96,9 +96,13 @@ router.get('/results/:raceId', requireApiToken, (req, res) => {
   const pre = RaceState.findPrecomputedById(raceId)
   if (!pre) return res.status(404).json({ error: 'Race not found' })
   res.json({
+    // Canonical fields
     winnerId: pre.winnerId,
     finishOrder: pre.finishOrder,
     finishTimesMs: pre.finishTimesMs,
+    // Frontend-friendly aliases
+    winner: pre.winnerId,
+    placements: [...pre.finishOrder],
   })
 })
 

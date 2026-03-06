@@ -6,7 +6,8 @@ import { RaceWebSocketServer } from './websocket/wsServer.js'
 import { runRestartRecovery } from './recovery/restartRecovery.js'
 import { startWatchdog, stopWatchdog } from './timeline/watchdog.js'
 import { MasterTimeline } from './timeline/masterTimeline.js'
-import { start as startEngine, stop as stopEngine } from './race/engineLoop.js'
+import { stop as stopEngine } from './race/engineLoop.js'
+import { startCycleClock, stopCycleClock } from './race/cycleClock.js'
 import raceRoutes from './api/raceRoutes.js'
 import { engineMetrics } from './metrics/engineMetrics.js'
 import {
@@ -131,8 +132,8 @@ runRestartRecovery()
 // Start watchdog
 startWatchdog()
 
-// Start engine loop (20Hz)
-startEngine()
+// Start lifecycle driver (ticks RaceStateMachine; starts engine only during race_running)
+startCycleClock()
 
 // Start server
 server.listen(PORT, () => {
@@ -157,6 +158,7 @@ if (process.env.LEADER_ELECTION === '1') {
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully')
   stopWatchdog()
+  stopCycleClock()
   stopEngine()
   MasterTimeline.shutdown()
   server.close(() => {
@@ -168,6 +170,7 @@ process.on('SIGTERM', () => {
 process.on('SIGINT', () => {
   console.log('SIGINT received, shutting down gracefully')
   stopWatchdog()
+  stopCycleClock()
   stopEngine()
   MasterTimeline.shutdown()
   server.close(() => {
