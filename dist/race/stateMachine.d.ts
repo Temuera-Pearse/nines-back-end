@@ -3,6 +3,7 @@ type Subscriber = (phase: RacePhase, second: number, data?: any) => void;
 export declare class RaceStateMachine {
     state: RacePhase;
     private currentSecond;
+    private lastProcessedUTCSec;
     private events;
     transition(next: RacePhase): void;
     is(state: RacePhase): boolean;

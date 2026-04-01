@@ -1,8 +1,9 @@
 import { promises as fs } from 'fs'
-import { dirname, join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { fileURLToPath } from 'url'
 import { logEvent } from '../utils/logEvent.js'
-import type { PrecomputedRace } from '../race/raceTypes.js'
+import type { ArtifactType, StorageProvider } from '../db/types.js'
+import type { PrecomputedRace, RaceFinishPayload } from '../race/raceTypes.js'
 import type { FinalHorseStateMatrix } from '../race/events/effects.js'
 import type { EventTimeline, EventInstance } from '../race/events/timeline.js'
 import type { WinnerResult } from '../race/winner.js'
@@ -27,6 +28,7 @@ export type RaceOutcome = Readonly<{
 export type RaceData = Readonly<{
   raceId: string
   seed: string
+  authoritativeFinish: RaceFinishPayload
   precomputedPaths: FinalHorseStateMatrix | ReadonlyArray<unknown> // allow compacted representation
   tickStream?: ReadonlyArray<unknown> // optional, partial allowed
   eventTimeline: EventTimeline
@@ -37,8 +39,27 @@ export type RaceData = Readonly<{
   checksum?: string
 }>
 
+export type PersistenceStatus = 'saved' | 'partial' | 'unsaved'
+
+export type PersistedArtifactDescriptor = Readonly<{
+  artifactType: ArtifactType
+  storageProvider: StorageProvider
+  storageKey: string
+  contentType: string
+  byteSize?: number
+  checksum?: string
+}>
+
+export type SaveRaceResult = Readonly<{
+  persistenceStatus: PersistenceStatus
+  artifacts: ReadonlyArray<PersistedArtifactDescriptor>
+  hasPrecomputedPaths: boolean
+  hasTickStream: boolean
+  eventsCount: number
+}>
+
 export interface RacePersistence {
-  saveRace(raceId: string, data: RaceData): Promise<void>
+  saveRace(raceId: string, data: RaceData): Promise<SaveRaceResult>
   markUnsaved(raceId: string): void
 }
 
@@ -56,22 +77,25 @@ export class FileRacePersistence implements RacePersistence {
     this.baseDir = baseDir
   }
 
-  async saveRace(raceId: string, data: RaceData): Promise<void> {
+  async saveRace(raceId: string, data: RaceData): Promise<SaveRaceResult> {
     // Compose atomic payload (summary + optional tick stream)
+    const hasTickStream =
+      Array.isArray(data.tickStream) && data.tickStream.length > 0
+    const hasPrecomputedPaths =
+      Array.isArray(data.precomputedPaths) && data.precomputedPaths.length > 0
+    const eventsCount = countEventTimeline(data.eventTimeline)
     const summary = {
       raceId: data.raceId,
       seed: data.seed,
+      authoritativeFinish: data.authoritativeFinish,
       outcome: data.outcome,
       winner: data.winner,
       config: data.config ?? undefined,
       checksum: data.checksum ?? undefined,
       // Lightweight references for large arrays
-      hasTickStream:
-        Array.isArray(data.tickStream) && data.tickStream.length > 0,
-      hasPrecomputedPaths:
-        Array.isArray(data.precomputedPaths) &&
-        data.precomputedPaths.length > 0,
-      eventsCount: countEventTimeline(data.eventTimeline),
+      hasTickStream,
+      hasPrecomputedPaths,
+      eventsCount,
     }
 
     const dir = join(this.baseDir, sanitize(raceId))
@@ -80,19 +104,26 @@ export class FileRacePersistence implements RacePersistence {
     const precompPath = join(dir, 'precomputedPaths.json')
     const timelinePath = join(dir, 'eventTimeline.json')
     const ticksPath = join(dir, 'ticks.json')
+    const artifacts: PersistedArtifactDescriptor[] = []
+    let hadFailure = false
 
     try {
       await fs.mkdir(dir, { recursive: true })
 
       // Write large payloads first (non-atomic), but failures here should not block summary atomics
       // Precomputed paths
-      if (
-        Array.isArray(data.precomputedPaths) &&
-        data.precomputedPaths.length > 0
-      ) {
+      if (hasPrecomputedPaths) {
         try {
-          await writeJson(precompPath, data.precomputedPaths)
+          const byteSize = await writeJson(precompPath, data.precomputedPaths)
+          artifacts.push({
+            artifactType: 'final_horse_state_matrix',
+            storageProvider: 'local_fs',
+            storageKey: precompPath,
+            contentType: 'application/json',
+            byteSize,
+          })
         } catch (e: any) {
+          hadFailure = true
           this.markUnsaved(raceId)
           logEvent('persist:paths-write-error', {
             raceId,
@@ -104,8 +135,16 @@ export class FileRacePersistence implements RacePersistence {
       // Event timeline (serialize to tick-indexed arrays)
       try {
         const serializedTimeline = serializeTimeline(data.eventTimeline)
-        await writeJson(timelinePath, serializedTimeline)
+        const byteSize = await writeJson(timelinePath, serializedTimeline)
+        artifacts.push({
+          artifactType: 'event_timeline',
+          storageProvider: 'local_fs',
+          storageKey: timelinePath,
+          contentType: 'application/json',
+          byteSize,
+        })
       } catch (e: any) {
+        hadFailure = true
         this.markUnsaved(raceId)
         logEvent('persist:timeline-write-error', {
           raceId,
@@ -114,10 +153,18 @@ export class FileRacePersistence implements RacePersistence {
       }
 
       // Optional tick stream (partial allowed)
-      if (Array.isArray(data.tickStream) && data.tickStream.length > 0) {
+      if (hasTickStream) {
         try {
-          await writeJson(ticksPath, data.tickStream)
+          const byteSize = await writeJson(ticksPath, data.tickStream)
+          artifacts.push({
+            artifactType: 'raw_ticks',
+            storageProvider: 'local_fs',
+            storageKey: ticksPath,
+            contentType: 'application/json',
+            byteSize,
+          })
         } catch (e: any) {
+          hadFailure = true
           this.markUnsaved(raceId)
           logEvent('persist:ticks-write-error', {
             raceId,
@@ -127,8 +174,15 @@ export class FileRacePersistence implements RacePersistence {
       }
 
       // Atomic summary: write to tmp then rename
-      await writeJson(summaryPathTmp, summary)
+      const summaryByteSize = await writeJson(summaryPathTmp, summary)
       await fs.rename(summaryPathTmp, summaryPath)
+      artifacts.unshift({
+        artifactType: 'summary',
+        storageProvider: 'local_fs',
+        storageKey: summaryPath,
+        contentType: 'application/json',
+        byteSize: summaryByteSize,
+      })
 
       // Mark race as saved (remove unsaved flag if present)
       if (this.unsaved.has(raceId)) {
@@ -136,6 +190,13 @@ export class FileRacePersistence implements RacePersistence {
         logEvent('persist:unsaved-cleared', { raceId })
       }
       logEvent('persist:race-saved', { raceId })
+      return {
+        persistenceStatus: hadFailure ? 'partial' : 'saved',
+        artifacts,
+        hasPrecomputedPaths,
+        hasTickStream,
+        eventsCount,
+      }
     } catch (e: any) {
       // Summary write failure → keep unsaved marker, do not throw to main loop
       this.markUnsaved(raceId)
@@ -149,6 +210,13 @@ export class FileRacePersistence implements RacePersistence {
         raceId,
         error: e?.message ?? String(e),
       })
+      return {
+        persistenceStatus: 'unsaved',
+        artifacts,
+        hasPrecomputedPaths,
+        hasTickStream,
+        eventsCount,
+      }
     }
   }
 
@@ -182,38 +250,103 @@ export class S3RacePersistence implements RacePersistence {
     this.prefix = prefix
     this.s3 = new S3ClientRef({})
   }
-  async saveRace(raceId: string, data: RaceData): Promise<void> {
+  async saveRace(raceId: string, data: RaceData): Promise<SaveRaceResult> {
     const baseKey = this.keyFor(raceId)
+    const hasTickStream =
+      Array.isArray(data.tickStream) && data.tickStream.length > 0
+    const hasPrecomputedPaths =
+      Array.isArray(data.precomputedPaths) && data.precomputedPaths.length > 0
+    const eventsCount = countEventTimeline(data.eventTimeline)
     const summary = {
       raceId: data.raceId,
       seed: data.seed,
+      authoritativeFinish: data.authoritativeFinish,
       outcome: data.outcome,
       winner: data.winner,
       config: data.config ?? undefined,
       checksum: data.checksum ?? undefined,
-      hasTickStream:
-        Array.isArray(data.tickStream) && data.tickStream.length > 0,
-      hasPrecomputedPaths:
-        Array.isArray(data.precomputedPaths) &&
-        data.precomputedPaths.length > 0,
-      eventsCount: countEventTimeline(data.eventTimeline),
+      hasTickStream,
+      hasPrecomputedPaths,
+      eventsCount,
     }
-    await this.putJson(`${baseKey}/summary.json`, summary)
-    if (
-      Array.isArray(data.precomputedPaths) &&
-      data.precomputedPaths.length > 0
-    ) {
-      await this.putJson(
-        `${baseKey}/precomputedPaths.json`,
-        data.precomputedPaths,
-      )
-    }
-    await this.putJson(
-      `${baseKey}/eventTimeline.json`,
-      serializeTimeline(data.eventTimeline),
-    )
-    if (Array.isArray(data.tickStream) && data.tickStream.length > 0) {
-      await this.putJson(`${baseKey}/ticks.json`, data.tickStream)
+    const artifacts: PersistedArtifactDescriptor[] = []
+    let hadFailure = false
+
+    try {
+      const summaryKey = `${baseKey}/summary.json`
+      const summaryByteSize = await this.putJson(summaryKey, summary)
+      artifacts.push({
+        artifactType: 'summary',
+        storageProvider: 's3',
+        storageKey: summaryKey,
+        contentType: 'application/json',
+        byteSize: summaryByteSize,
+      })
+
+      if (hasPrecomputedPaths) {
+        try {
+          const key = `${baseKey}/precomputedPaths.json`
+          const byteSize = await this.putJson(key, data.precomputedPaths)
+          artifacts.push({
+            artifactType: 'final_horse_state_matrix',
+            storageProvider: 's3',
+            storageKey: key,
+            contentType: 'application/json',
+            byteSize,
+          })
+        } catch {
+          hadFailure = true
+        }
+      }
+
+      try {
+        const key = `${baseKey}/eventTimeline.json`
+        const byteSize = await this.putJson(
+          key,
+          serializeTimeline(data.eventTimeline),
+        )
+        artifacts.push({
+          artifactType: 'event_timeline',
+          storageProvider: 's3',
+          storageKey: key,
+          contentType: 'application/json',
+          byteSize,
+        })
+      } catch {
+        hadFailure = true
+      }
+
+      if (hasTickStream) {
+        try {
+          const key = `${baseKey}/ticks.json`
+          const byteSize = await this.putJson(key, data.tickStream)
+          artifacts.push({
+            artifactType: 'raw_ticks',
+            storageProvider: 's3',
+            storageKey: key,
+            contentType: 'application/json',
+            byteSize,
+          })
+        } catch {
+          hadFailure = true
+        }
+      }
+
+      return {
+        persistenceStatus: hadFailure ? 'partial' : 'saved',
+        artifacts,
+        hasPrecomputedPaths,
+        hasTickStream,
+        eventsCount,
+      }
+    } catch {
+      return {
+        persistenceStatus: 'unsaved',
+        artifacts,
+        hasPrecomputedPaths,
+        hasTickStream,
+        eventsCount,
+      }
     }
   }
   markUnsaved(_raceId: string): void {
@@ -224,7 +357,7 @@ export class S3RacePersistence implements RacePersistence {
     const p = this.prefix ? this.prefix.replace(/\/$/, '') + '/' : ''
     return `${p}${clean}`
   }
-  private async putJson(key: string, obj: unknown): Promise<void> {
+  private async putJson(key: string, obj: unknown): Promise<number> {
     const Body = Buffer.from(JSON.stringify(obj))
     const cmd = new PutObjectCommandRef({
       Bucket: this.bucket,
@@ -233,6 +366,7 @@ export class S3RacePersistence implements RacePersistence {
       ContentType: 'application/json',
     })
     await this.s3.send(cmd)
+    return Body.byteLength
   }
 }
 
@@ -256,13 +390,17 @@ export function getRacePersistence(): RacePersistence {
 // ---------- Helpers ----------
 
 function defaultDataDir(): string {
+  if (process.env.RACE_DATA_DIR) {
+    return resolve(process.env.RACE_DATA_DIR)
+  }
   const base = fileURLToPath(new URL('.', import.meta.url))
   return join(base, '../../data/races')
 }
 
-async function writeJson(path: string, obj: unknown): Promise<void> {
+async function writeJson(path: string, obj: unknown): Promise<number> {
   const json = JSON.stringify(obj)
   await fs.writeFile(path, json, 'utf8')
+  return Buffer.byteLength(json)
 }
 
 async function writeFileBestEffort(

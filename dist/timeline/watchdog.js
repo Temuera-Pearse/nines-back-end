@@ -2,6 +2,7 @@ import { RaceState } from '../race/raceState.js';
 import { MasterTimeline } from './masterTimeline.js';
 import { logEvent } from '../utils/logEvent.js';
 import { activeRaces } from '../race/activeRaceMemory.js';
+import { isRunning as isEngineRunning } from '../race/engineLoop.js';
 const WATCHDOG_INTERVAL_MS = 1000;
 const MAX_RACE_DRIFT_MS = 500; // warn threshold
 let watchdogTimerId = 'watchdog:main';
@@ -29,7 +30,9 @@ export function startWatchdog() {
         // State sanity: running but no timers registered for this race
         if (sm.is('race_running')) {
             const timersForRace = MasterTimeline.getTimerIds().filter((id) => id.includes(pre.id));
-            if (timersForRace.length === 0) {
+            // We no longer rely on MasterTimeline for the 20Hz engine; the engine uses setTimeout.
+            // So the actionable signal is: lifecycle says running, but the engine loop is NOT running.
+            if (timersForRace.length === 0 && !isEngineRunning()) {
                 logEvent('watchdog:missing-timers', { raceId: pre.id });
                 // Scheduler cadence remains; no forced re-schedule to avoid changing timing
             }

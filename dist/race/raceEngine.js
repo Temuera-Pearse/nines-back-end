@@ -2,14 +2,16 @@ import { RaceWebSocketServer } from '../websocket/wsServer.js';
 import { activeRaces } from './activeRaceMemory.js';
 import { RaceState } from './raceState.js';
 import { computeRaceChecksum } from './checksum.js';
-import { makeMulberry32 } from './rng.js';
+import { makeMulberry32, hashStringToInt } from './rng.js';
 import { performance } from 'perf_hooks';
 import { engineMetrics } from '../metrics/engineMetrics.js';
 import { EVENT_CATALOG } from './events/catalog.js';
 import { generateEventTimeline } from './events/timeline.js';
 import { applyEventEffects, } from './events/effects.js';
 import { determineWinner } from './winner.js';
-import { FileRacePersistence } from '../persistence/racePersistence.js';
+import { getRacePersistence } from '../persistence/racePersistence.js';
+import { getRaceRepository } from '../db/raceRepository.js';
+import { getRaceArtifactRepository } from '../db/raceArtifactRepository.js';
 // Easing helpers for smooth curves
 const easeInQuad = (t) => t * t;
 const easeOutQuad = (t) => t * (2 - t);
@@ -19,18 +21,127 @@ export const TRACK_LENGTH = 1000;
 const VERBOSE = process.env.LOG_VERBOSE === 'true';
 const ts = () => new Date().toISOString();
 const log = (...args) => console.log(...args);
+const FINISH_FLASH_MS = 1600;
+const WINNER_BANNER_HOLD_MS = 1800;
+const MIN_RESULTS_VISIBLE_MS = 8_000;
+const DEFAULT_RESULTS_VISIBLE_MS = 12_000;
+const MAX_SEED_RETRY_ATTEMPTS = 64;
 let currentRace = null;
 let precomputed = null;
 let lastStreamedIndex = null;
 let consecutiveTickFailures = 0;
-const persistence = new FileRacePersistence();
+const persistence = getRacePersistence();
+const raceRepository = getRaceRepository();
+const raceArtifactRepository = getRaceArtifactRepository();
+// Pre-allocated positions buffer — reused every tick to avoid per-tick GC pressure.
+// Safe because RaceWebSocketServer.broadcast() is synchronous and JSON.stringify
+// captures all values before this buffer is overwritten by the next tick.
+const _posBuffer = [];
+function deriveResultsVisibleUntilUtc(raceEndUtc) {
+    const minimumVisibleUntilMs = Date.now() + MIN_RESULTS_VISIBLE_MS;
+    const raceEndMs = new Date(raceEndUtc).getTime();
+    if (!Number.isFinite(raceEndMs)) {
+        return new Date(Date.now() + DEFAULT_RESULTS_VISIBLE_MS).toISOString();
+    }
+    const nextMinuteBoundaryMs = Math.ceil(raceEndMs / 60_000) * 60_000;
+    const boundaryDiffMs = nextMinuteBoundaryMs - raceEndMs;
+    if (boundaryDiffMs >= 10_000 && boundaryDiffMs <= 15_000) {
+        return new Date(Math.max(nextMinuteBoundaryMs, minimumVisibleUntilMs)).toISOString();
+    }
+    return new Date(Math.max(raceEndMs + DEFAULT_RESULTS_VISIBLE_MS, minimumVisibleUntilMs)).toISOString();
+}
+function buildAuthoritativeFinishPayload(pre, timestamp) {
+    const timestampUtc = timestamp.toISOString();
+    return {
+        raceId: pre.id,
+        timestampUtc,
+        winnerId: pre.winnerId,
+        finishOrder: [...pre.finishOrder],
+        finishTimesMs: { ...pre.finishTimesMs },
+        finishTickIndex: { ...pre.finishTickIndex },
+        presentation: {
+            bannerVisibleUntilUtc: new Date(timestamp.getTime() + FINISH_FLASH_MS + WINNER_BANNER_HOLD_MS).toISOString(),
+            resultsVisibleUntilUtc: deriveResultsVisibleUntilUtc(timestampUtc),
+        },
+    };
+}
+function buildWinnerDeclaredPayload(pre) {
+    if (!pre.startTime || !pre.winnerId)
+        return null;
+    const winnerCrossMs = pre.finishTimesMs[pre.winnerId];
+    if (!Number.isFinite(winnerCrossMs))
+        return null;
+    const timestampMs = pre.startTime.getTime() + winnerCrossMs;
+    return {
+        raceId: pre.id,
+        timestampUtc: new Date(timestampMs).toISOString(),
+        winnerId: pre.winnerId,
+        finishOrder: [...pre.finishOrder],
+        finishTimesMs: { ...pre.finishTimesMs },
+        finishTickIndex: { ...pre.finishTickIndex },
+        presentation: {
+            bannerVisibleUntilUtc: new Date(timestampMs + FINISH_FLASH_MS + WINNER_BANNER_HOLD_MS).toISOString(),
+            resultsVisibleUntilUtc: deriveResultsVisibleUntilUtc(new Date(timestampMs).toISOString()),
+        },
+    };
+}
+function winnerResultFromFinishPayload(pre, finish) {
+    const timestampMs = finish.finishTimesMs[finish.winnerId] ?? 0;
+    return Object.freeze({
+        horseId: finish.winnerId,
+        tickIndex: finish.finishTickIndex[finish.winnerId] ??
+            Math.floor(timestampMs / pre.config.dtMs),
+        timestampMs,
+    });
+}
+function announceWinnerDeclaredIfNeeded(currentTickIndex) {
+    if (!precomputed?.startTime || !currentRace?.isActive)
+        return;
+    const winnerTickIndex = precomputed.finishTickIndex[precomputed.winnerId];
+    if (!Number.isFinite(winnerTickIndex) || currentTickIndex < winnerTickIndex) {
+        return;
+    }
+    const rec = activeRaces.get(precomputed.id);
+    if (rec?.winnerDeclaredSent)
+        return;
+    const payload = buildWinnerDeclaredPayload(precomputed);
+    if (!payload)
+        return;
+    if (rec) {
+        rec.winnerDeclaredSent = true;
+        activeRaces.set(precomputed.id, rec);
+    }
+    RaceWebSocketServer.broadcast({
+        type: 'race:winner-declared',
+        ...payload,
+    });
+}
 function persistCompletedRace(pre) {
     try {
         if (!pre.finalHorseStateMatrix || !pre.eventTimeline) {
             persistence.markUnsaved(pre.id);
+            void raceRepository
+                .markRaceFinished({
+                raceId: pre.id,
+                actualEndTime: pre.endTime ?? null,
+                checksum: pre.checksum ?? null,
+                winnerId: pre.winnerId,
+                finishOrder: [...pre.finishOrder],
+                finishTimesMs: { ...pre.finishTimesMs },
+                config: pre.config,
+                hasTickStream: false,
+                hasPrecomputedPaths: false,
+                eventsCount: 0,
+                persistenceStatus: 'unsaved',
+                lifecycleStatus: 'results_showing',
+            })
+                .catch(() => { });
             return;
         }
-        const winner = determineWinner(pre.finalHorseStateMatrix, pre.finishLine, pre.config.dtMs);
+        const authoritativeFinish = pre.authoritativeFinish ??
+            buildAuthoritativeFinishPayload(pre, pre.endTime ?? new Date());
+        pre.authoritativeFinish = authoritativeFinish;
+        const winner = determineWinner(pre.finalHorseStateMatrix, pre.finishLine, pre.config.dtMs) ?? winnerResultFromFinishPayload(pre, authoritativeFinish);
         const outcome = Object.freeze({
             winnerId: pre.winnerId,
             finishOrder: pre.finishOrder,
@@ -39,16 +150,58 @@ function persistCompletedRace(pre) {
         const data = {
             raceId: pre.id,
             seed: pre.config.seed,
+            authoritativeFinish,
             precomputedPaths: pre.finalHorseStateMatrix,
             eventTimeline: pre.eventTimeline,
             outcome,
-            winner: winner,
+            winner,
             config: pre.config,
             checksum: pre.checksum,
         };
-        persistence
+        void persistence
             .saveRace(pre.id, data)
-            .catch((e) => log(`[${ts()}][PERSIST][${pre.id}] ${e?.message || e}`));
+            .then(async (result) => {
+            await raceRepository.markRaceFinished({
+                raceId: pre.id,
+                actualEndTime: pre.endTime ?? null,
+                checksum: pre.checksum ?? null,
+                winnerId: pre.winnerId,
+                finishOrder: [...pre.finishOrder],
+                finishTimesMs: { ...pre.finishTimesMs },
+                config: pre.config,
+                hasTickStream: result.hasTickStream,
+                hasPrecomputedPaths: result.hasPrecomputedPaths,
+                eventsCount: result.eventsCount,
+                persistenceStatus: result.persistenceStatus,
+                lifecycleStatus: 'results_showing',
+            });
+            await raceArtifactRepository.upsertArtifacts(result.artifacts.map((artifact) => ({
+                raceId: pre.id,
+                artifactType: artifact.artifactType,
+                storageProvider: artifact.storageProvider,
+                storageKey: artifact.storageKey,
+                contentType: artifact.contentType,
+                byteSize: artifact.byteSize ?? null,
+                checksum: artifact.checksum ?? null,
+            })));
+        })
+            .catch(async (e) => {
+            log(`[${ts()}][PERSIST][${pre.id}] ${e?.message || e}`);
+            await raceRepository.markRaceFinished({
+                raceId: pre.id,
+                actualEndTime: pre.endTime ?? null,
+                checksum: pre.checksum ?? null,
+                winnerId: pre.winnerId,
+                finishOrder: [...pre.finishOrder],
+                finishTimesMs: { ...pre.finishTimesMs },
+                config: pre.config,
+                hasTickStream: false,
+                hasPrecomputedPaths: false,
+                eventsCount: 0,
+                persistenceStatus: 'unsaved',
+                lifecycleStatus: 'results_showing',
+            });
+        });
     }
     catch (e) {
         log(`[${ts()}][PERSIST][${pre.id}] compose-error ${e?.message || e}`);
@@ -56,6 +209,7 @@ function persistCompletedRace(pre) {
             persistence.markUnsaved(pre.id);
         }
         catch { }
+        void raceRepository.markPersistenceStatus(pre.id, 'unsaved').catch(() => { });
     }
 }
 /**
@@ -222,8 +376,8 @@ export function generateRaceTicks(horses, config, rng) {
     const sampleFirst = ticks.slice(0, 3);
     const sampleLast = ticks.slice(-3);
     log(`[${ts()}][TICKS][${raceId}] Sample ticks: first3=${JSON.stringify(sampleFirst)} last3=${JSON.stringify(sampleLast)}`);
-    log(`[${ts()}][RACE][${raceId}] Projected finish times (ms): ${JSON.stringify(finishTimesMs)}`);
-    log(`[${ts()}][RACE][${raceId}] Precompute complete. Winner=${winnerId}`);
+    log(`[${ts()}][RACE][${raceId}] Base finish times (ms): ${JSON.stringify(finishTimesMs)}`);
+    log(`[${ts()}][RACE][${raceId}] Base pre-event winner=${winnerId}`);
     return { ticks, finishOrder, finishTimesMs, winnerId, finishTickIndex };
 }
 /**
@@ -231,12 +385,82 @@ export function generateRaceTicks(horses, config, rng) {
  * Uses the single RNG created from the current seed stored in RaceState.
  */
 export function seedPrecomputedRace() {
-    const seedStr = RaceState.getCurrentSeed();
-    const seedInt = RaceState.getCurrentSeedInt();
-    if (!seedStr || seedInt == null) {
+    const baseSeedStr = RaceState.getCurrentSeed();
+    if (!baseSeedStr) {
         throw new Error('Active cycle seed not set');
     }
-    // Deterministic raceId derived from seed
+    let seededRace = null;
+    let selectedSeedStr = baseSeedStr;
+    for (let attempt = 0; attempt < MAX_SEED_RETRY_ATTEMPTS; attempt++) {
+        const candidateSeed = attempt === 0 ? baseSeedStr : `${baseSeedStr}:finish-retry-${attempt}`;
+        const candidateSeedInt = hashStringToInt(candidateSeed);
+        const candidate = buildSeededRace(candidateSeed, candidateSeedInt);
+        if (candidate.crossingsCount > 0) {
+            seededRace = candidate;
+            selectedSeedStr = candidateSeed;
+            break;
+        }
+        log(`[${ts()}][RACE][retry] Seed ${candidateSeed} produced no canonical crossings; retrying`);
+    }
+    if (!seededRace) {
+        throw new Error('Unable to seed a race with a canonical finish crossing');
+    }
+    if (selectedSeedStr !== baseSeedStr) {
+        RaceState.setCurrentSeed(selectedSeedStr);
+    }
+    precomputed = seededRace.precomputed;
+    const raceId = precomputed.id;
+    lastStreamedIndex = null;
+    try {
+        const catchupTicks = (precomputed.finalHorseStateMatrix ?? []).map((states, i) => ({
+            tickIndex: i,
+            positions: states.map((s) => s.position),
+            events: Array.from(buildLiveRaceEvents(precomputed, i)),
+            effects: Array.from(buildLiveHorseEffects(precomputed, i)),
+        }));
+        activeRaces.set(raceId, {
+            ticks: catchupTicks,
+            startTime: 0,
+            currentTickIndex: -1,
+            winnerDeclaredSent: false,
+        });
+    }
+    catch {
+        // no-op (non-fatal; additive only)
+    }
+    log(`[${ts()}][RACE][${raceId}] Seeded race`, {
+        raceId,
+        trackLength: precomputed.config.trackLength,
+        finishLine: precomputed.finishLine,
+        durationMs: precomputed.config.durationMs,
+        dtMs: precomputed.config.dtMs,
+        winnerId: precomputed.winnerId,
+        seed: precomputed.config.seed,
+    });
+    void raceRepository
+        .upsertSeededRace({
+        raceId,
+        seed: selectedSeedStr,
+        checksum: precomputed.checksum ?? null,
+        config: precomputed.config,
+        eventsCount: seededRace.eventsCount,
+    })
+        .catch((e) => log(`[${ts()}][DB][${raceId}] seed-upsert-error ${e?.message || e}`));
+    try {
+        RaceWebSocketServer.broadcast({
+            type: 'race:info',
+            raceId: precomputed.id,
+            horseOrder: precomputed.horses.map((h) => h.id),
+            config: precomputed.config,
+            currentTickIndex: -1,
+        });
+    }
+    catch {
+        // non-fatal: clients will receive race:info on next reconnect
+    }
+    return precomputed;
+}
+function buildSeededRace(seedStr, seedInt) {
     const raceId = `race-${seedInt.toString(16).padStart(8, '0')}`;
     const config = {
         trackLength: TRACK_LENGTH,
@@ -273,19 +497,18 @@ export function seedPrecomputedRace() {
         finalMatrix: finalHorseStateMatrix,
         ticks,
     });
-    // Winner from canonical matrix (keeps acceptance criteria aligned)
-    const winnerFromMatrix = determineWinner(finalHorseStateMatrix, finishLine, config.dtMs)?.horseId ||
-        winnerId;
     // Crossing times derived from canonical matrix
     const crossings = computeCrossingsFromMatrix(finalHorseStateMatrix, finishLine, config.dtMs);
+    const canonicalFinishOrder = deriveCanonicalFinishOrderFromArtifacts(horses.map((horse) => horse.id), crossings.timesMs, finalHorseStateMatrix);
+    const winnerFromMatrix = canonicalFinishOrder[0] ?? winnerId;
     // Deep-freeze stable outputs
     const frozenTicks = deepFreezeTicks(ticks);
-    const frozenFinishOrder = Object.freeze(finishOrder);
+    const frozenFinishOrder = Object.freeze(canonicalFinishOrder);
     const frozenFinishTimes = Object.freeze({ ...crossings.timesMs });
     const tFreezeStart = performance.now();
     const frozenTimeline = freezeEventTimeline(eventTimeline);
     engineMetrics.recordPrecomputePhase('freeze', performance.now() - tFreezeStart);
-    precomputed = {
+    const nextPrecomputed = {
         id: raceId,
         config,
         horses,
@@ -303,38 +526,18 @@ export function seedPrecomputedRace() {
     };
     // Compute checksum and attach
     try {
-        const checksum = computeRaceChecksum(precomputed);
-        precomputed.checksum = checksum;
+        const checksum = computeRaceChecksum(nextPrecomputed);
+        nextPrecomputed.checksum = checksum;
         log(`[${ts()}][RACE][${raceId}] checksum=${checksum}`);
     }
     catch {
         // non-fatal
     }
-    lastStreamedIndex = null;
-    // Late-joiner: snapshot compact ticks for catch-up without touching engines or schedulers
-    try {
-        const catchupTicks = finalHorseStateMatrix.map((states, i) => ({
-            tickIndex: i,
-            positions: states.map((s) => s.position),
-        }));
-        activeRaces.set(raceId, {
-            ticks: catchupTicks,
-            startTime: 0,
-            currentTickIndex: -1,
-        });
-    }
-    catch {
-        // no-op (non-fatal; additive only)
-    }
-    log(`[${ts()}][RACE][${raceId}] Seeded race`, {
-        raceId,
-        trackLength: config.trackLength,
-        finishLine,
-        durationMs: config.durationMs,
-        dtMs: config.dtMs,
-        winnerId,
-    });
-    return precomputed;
+    return {
+        precomputed: nextPrecomputed,
+        eventsCount: Array.from(frozenTimeline.values()).reduce((count, events) => count + events.length, 0),
+        crossingsCount: Object.keys(crossings.timesMs).length,
+    };
 }
 /**
  * Bind the real-world clock to the precomputed race and mark it active.
@@ -390,16 +593,20 @@ export function startPrecomputedRace(startTime = new Date()) {
         if (rec) {
             rec.startTime = startTime.getTime();
             rec.currentTickIndex = -1;
+            rec.winnerDeclaredSent = false;
             activeRaces.set(precomputed.id, rec);
         }
     }
     catch {
         // non-fatal
     }
+    void raceRepository
+        .markRaceStarted(precomputed.id, startTime)
+        .catch((e) => log(`[${ts()}][DB][${precomputed?.id}] start-update-error ${e?.message || e}`));
     return precomputed;
 }
 // Helper: enforce sequential tick broadcasting and dedupe
-function broadcastTickSafe(runtimeRace, tickIndex, updates) {
+function broadcastTickSafe(runtimeRace, tickIndex, updates, events, effects) {
     if (tickIndex <= runtimeRace.lastBroadcastedTick) {
         log(`[${ts()}][TICK][${runtimeRace.id}] Dropping duplicate/old tick idx=${tickIndex} last=${runtimeRace.lastBroadcastedTick}`);
         return;
@@ -408,21 +615,85 @@ function broadcastTickSafe(runtimeRace, tickIndex, updates) {
         const skipped = tickIndex - runtimeRace.lastBroadcastedTick - 1;
         log(`[${ts()}][TICK][${runtimeRace.id}] Skipping ${skipped} ticks (last=${runtimeRace.lastBroadcastedTick}, now=${tickIndex})`);
     }
-    // Contract: positions[] is ordered by horseOrder (from race:start)
-    const posById = new Map();
-    for (const u of updates)
-        posById.set(u.horseId, u.position);
-    const positions = runtimeRace.horses.map((h) => posById.get(h.id) ?? h.position);
+    // Contract: positions[] is ordered by horseOrder (from race:start).
+    // Write directly into the pre-allocated module-level buffer — no Map, no array alloc.
+    const horses = runtimeRace.horses;
+    const n = horses.length;
+    if (_posBuffer.length !== n)
+        _posBuffer.length = n;
+    // Seed with each horse's last known position as fallback
+    for (let i = 0; i < n; i++)
+        _posBuffer[i] = horses[i].position;
+    // Overwrite with incoming state (O(n²) but n=10, cheaper than Map creation)
+    for (const s of updates) {
+        for (let i = 0; i < n; i++) {
+            if (horses[i].id === s.horseId) {
+                _posBuffer[i] = s.position;
+                break;
+            }
+        }
+    }
     RaceWebSocketServer.broadcast({
         type: 'race:tick',
         raceId: runtimeRace.id,
         data: {
             raceId: runtimeRace.id,
             tickIndex,
-            positions,
+            positions: _posBuffer,
+            events,
+            effects,
         },
     });
     runtimeRace.lastBroadcastedTick = tickIndex;
+}
+function buildLiveHorseEffects(pre, tickIndex) {
+    const states = pre.finalHorseStateMatrix?.[tickIndex] ?? [];
+    return states
+        .filter((state) => state.activeEvents.length > 0 || state.isStunned || state.isRemoved)
+        .map((state) => ({
+        horseId: state.horseId,
+        activeEventIds: [...state.activeEvents],
+        isStunned: state.isStunned,
+        isRemoved: state.isRemoved,
+    }));
+}
+function eventTouchesHorse(eventId, activeEventIds) {
+    if (activeEventIds.includes(eventId))
+        return true;
+    if (eventId === 'chain_reaction' && activeEventIds.includes('chain_stun')) {
+        return true;
+    }
+    return false;
+}
+function buildLiveRaceEvents(pre, tickIndex) {
+    const events = pre.eventTimeline?.get(tickIndex) ?? [];
+    const states = pre.finalHorseStateMatrix?.[tickIndex] ?? [];
+    return events.map((event) => ({
+        id: event.id,
+        instanceId: event.instanceId,
+        tickIndex,
+        affectedHorseIds: states
+            .filter((state) => eventTouchesHorse(event.id, state.activeEvents))
+            .map((state) => state.horseId),
+    }));
+}
+/**
+ * Derive finish order from canonical (event-modified) crossing times so that
+ * the declared result matches what clients visually observed on screen.
+ */
+function deriveCanonicalFinishOrder(pre) {
+    return deriveCanonicalFinishOrderFromArtifacts(pre.horses.map((h) => h.id), pre.finishTimesMs, pre.finalHorseStateMatrix);
+}
+function deriveCanonicalFinishOrderFromArtifacts(horseIds, finishTimesMs, finalHorseStateMatrix) {
+    const lastTick = finalHorseStateMatrix?.[finalHorseStateMatrix.length - 1];
+    const posMap = new Map((lastTick ?? []).map((state) => [state.horseId, state.position]));
+    return [...horseIds].sort((a, b) => {
+        const ta = finishTimesMs[a] ?? Infinity;
+        const tb = finishTimesMs[b] ?? Infinity;
+        if (ta !== tb)
+            return ta - tb;
+        return (posMap.get(b) ?? 0) - (posMap.get(a) ?? 0);
+    });
 }
 /**
  * Stream the current tick to clients based on real-world elapsed time.
@@ -456,11 +727,19 @@ export function streamPrecomputedTicks(now = new Date()) {
         horseId: s.horseId,
         position: s.position,
     }));
+    const events = buildLiveRaceEvents(precomputed, idx);
+    const effects = buildLiveHorseEffects(precomputed, idx);
     log(`[${ts()}][TICK][${precomputed.id}] Stream tick index=${idx} elapsed=${elapsedMs}ms`);
     // Sequential guard broadcast
     if (currentRace) {
-        broadcastTickSafe(currentRace, idx, updates);
+        broadcastTickSafe(currentRace, idx, updates, events, effects);
     }
+    const rec = activeRaces.get(precomputed.id);
+    if (rec) {
+        rec.currentTickIndex = idx;
+        activeRaces.set(precomputed.id, rec);
+    }
+    announceWinnerDeclaredIfNeeded(idx);
     consecutiveTickFailures = 0;
     const raceDurationOver = elapsedMs >= precomputed.config.durationMs;
     const winnerId = precomputed.winnerId;
@@ -468,21 +747,29 @@ export function streamPrecomputedTicks(now = new Date()) {
         // Before ending
         sm.transition('race_finished');
         currentRace.isActive = false;
-        currentRace.placements = precomputed.finishOrder.map((id) => {
+        // Use canonical (event-modified) finish order so the declared result
+        // matches what clients observed on screen.
+        const canonicalOrder = deriveCanonicalFinishOrder(precomputed);
+        currentRace.placements = canonicalOrder
+            .map((id) => {
             const h = currentRace.horses.find((hh) => hh.id === id);
+            if (!h) {
+                log(`[${ts()}][RACE][${precomputed.id}] WARNING: horse ${id} not in currentRace.horses; skipping`);
+            }
             return h;
-        });
-        currentRace.winner = currentRace.placements[0];
+        })
+            .filter((h) => h !== undefined);
+        currentRace.winner =
+            currentRace.horses.find((h) => h.id === precomputed.winnerId) ??
+                currentRace.placements[0];
         precomputed.endTime = now;
-        log(`[${ts()}][RACE][${precomputed.id}] Race finished. Winner=${winnerId}`);
+        precomputed.authoritativeFinish = buildAuthoritativeFinishPayload(precomputed, now);
+        log(`[${ts()}][RACE][${precomputed.id}] Race finished. Winner=${currentRace.winner.id}`);
         // Persist canonical artifacts
         persistCompletedRace(precomputed);
         RaceWebSocketServer.broadcast({
             type: 'race:finish',
-            timestampUtc: now.toISOString(),
-            raceId: precomputed.id,
-            winnerId: currentRace.winner.id,
-            finishOrder: currentRace.placements.map((h) => h.id),
+            ...precomputed.authoritativeFinish,
         });
     }
     return updates;
@@ -649,13 +936,14 @@ export function streamPrecomputedTickAt(tickIndex) {
     }
     const idx = Math.max(0, Math.min(tickIndex, (precomputed.finalHorseStateMatrix?.length ?? precomputed.ticks.length) -
         1));
-    const states = precomputed.finalHorseStateMatrix?.[idx];
-    const updates = (states ?? []).map((s) => ({
-        horseId: s.horseId,
-        position: s.position,
-    }));
+    // Pass states directly — avoids allocating a PositionUpdate[] wrapper array
+    // (10 objects + 1 array) on every tick.
+    const states = precomputed.finalHorseStateMatrix?.[idx] ?? [];
+    const events = buildLiveRaceEvents(precomputed, idx);
+    const effects = buildLiveHorseEffects(precomputed, idx);
     // Sequential guard broadcast
-    broadcastTickSafe(currentRace, idx, updates);
+    broadcastTickSafe(currentRace, idx, states, events, effects);
+    announceWinnerDeclaredIfNeeded(idx);
     // Update authoritative current tick for catch-up consumers
     const rec = activeRaces.get(precomputed.id);
     if (rec) {
@@ -667,32 +955,55 @@ export function streamPrecomputedTickAt(tickIndex) {
         (precomputed.finalHorseStateMatrix?.length ?? precomputed.ticks.length) - 1;
     if (isLast && currentRace.isActive) {
         currentRace.isActive = false;
-        currentRace.placements = precomputed.finishOrder.map((id) => {
-            const h = currentRace.horses.find((hh) => hh.id === id);
-            return h;
-        });
-        currentRace.winner = currentRace.placements[0];
+        // Use canonical (event-modified) finish order so ALL 10 horses are ranked —
+        // finishers by crossing time, non-finishers by final distance.
+        // This matches what deriveCanonicalFinishOrder produces in streamPrecomputedTicks.
+        const canonicalOrder = deriveCanonicalFinishOrder(precomputed);
+        currentRace.placements = canonicalOrder
+            .map((id) => currentRace.horses.find((hh) => hh.id === id))
+            .filter((h) => h !== undefined);
+        currentRace.winner =
+            currentRace.horses.find((h) => h.id === precomputed.winnerId) ??
+                currentRace.placements[0];
         if (precomputed.startTime) {
             const endOffset = precomputed.config.durationMs;
             precomputed.endTime = new Date(precomputed.startTime.getTime() + endOffset);
         }
+        precomputed.authoritativeFinish = buildAuthoritativeFinishPayload(precomputed, precomputed.endTime ?? new Date());
         // Persist canonical artifacts
         persistCompletedRace(precomputed);
         RaceWebSocketServer.broadcast({
             type: 'race:finish',
-            timestampUtc: (precomputed.endTime ?? new Date()).toISOString(),
-            raceId: precomputed.id,
-            winnerId: currentRace.winner.id,
-            finishOrder: currentRace.placements.map((h) => h.id),
+            ...precomputed.authoritativeFinish,
         });
-        // Archive and clear global state for API routes.
+        // Clear the live runtime race. Archiving is deferred to releaseRace() at the
+        // cycle boundary so RaceState.getPrecomputedRace() keeps returning this race
+        // (with endTime set) during the :51–:59 results window for late-joiner replay.
         try {
-            RaceState.completeRace();
             RaceState.setCurrentRace(null);
         }
         catch {
             // non-fatal
         }
+        // Remove from catch-up memory once finished to avoid stale sync
+        // (clients should not request catch-up for completed races).
+        try {
+            activeRaces.delete(precomputed.id);
+        }
+        catch {
+            // non-fatal
+        }
+        // Hard reset module-local pointers so the next cycle is guaranteed fresh.
+        // (RaceState history retains the completed race; we only clear live runtime refs.)
+        try {
+            currentRace = null;
+            precomputed = null;
+            lastStreamedIndex = null;
+            consecutiveTickFailures = 0;
+        }
+        catch {
+            // non-fatal
+        }
     }
-    return updates;
+    return [];
 }

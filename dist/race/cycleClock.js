@@ -5,8 +5,8 @@ import { getLeaderRole } from '../leader/elector.js';
 import { logEvent } from '../utils/logEvent.js';
 let running = false;
 let unsubscribe = null;
+let alignedTimerRef = null;
 const CLOCK_ID = 'cycleClock:main';
-const INTERVAL_MS = 1000;
 function shouldDriveLifecycle() {
     // If leader election is enabled, only the leader drives lifecycle.
     if (process.env.LEADER_ELECTION === '1')
@@ -15,11 +15,36 @@ function shouldDriveLifecycle() {
     return (process.env.BROADCAST_ROLE || 'leader') === 'leader';
 }
 function reconcileEngine(phase) {
-    const shouldRun = shouldDriveLifecycle() && phase === 'race_running';
+    // Only run the high-frequency engine when we actually have an active current race.
+    // This avoids a brief restart after the engine naturally stops at the last tick
+    // while the 1Hz lifecycle is still in `race_running`.
+    const cur = RaceState.getCurrentRace();
+    const shouldRun = shouldDriveLifecycle() && phase === 'race_running' && cur?.isActive === true;
     if (shouldRun && !isRunning())
         startEngine();
     if (!shouldRun && isRunning())
         stopEngine();
+}
+/** Schedule the next tick to fire precisely at the next UTC-second boundary. */
+function scheduleNextAlignedTick(fn) {
+    if (!running)
+        return;
+    const now = Date.now();
+    // How many ms until the next whole-second boundary?
+    const delay = 1000 - (now % 1000);
+    alignedTimerRef = setTimeout(() => {
+        if (!running)
+            return;
+        try {
+            fn();
+        }
+        catch (e) {
+            logEvent('cycle:tick-error', {
+                error: e?.message ?? String(e),
+            });
+        }
+        scheduleNextAlignedTick(fn);
+    }, delay);
 }
 export function startCycleClock() {
     if (running)
@@ -34,27 +59,37 @@ export function startCycleClock() {
         reconcileEngine(phase);
         logEvent('cycle:phase', { phase });
     });
-    MasterTimeline.setInterval(CLOCK_ID, INTERVAL_MS, () => {
+    const tick = () => {
         if (!running)
             return;
         if (!shouldDriveLifecycle()) {
-            // Safety: ensure edges don't accidentally run the engine.
             if (isRunning())
                 stopEngine();
             return;
         }
-        // Reconcile engine even if only leadership changed.
         reconcileEngine(sm.state);
         try {
             sm.tick();
         }
         catch (e) {
-            logEvent('cycle:tick-error', { error: e?.message ?? String(e) });
+            logEvent('cycle:tick-error', {
+                phase: sm.state,
+                error: e?.message ?? String(e),
+                stack: e?.stack ? String(e.stack) : undefined,
+            });
         }
-    });
+    };
+    // Fire once immediately so the state machine catches up to the current UTC second,
+    // then schedule all subsequent ticks precisely on UTC-second boundaries.
+    tick();
+    scheduleNextAlignedTick(tick);
 }
 export function stopCycleClock() {
     running = false;
+    if (alignedTimerRef !== null) {
+        clearTimeout(alignedTimerRef);
+        alignedTimerRef = null;
+    }
     MasterTimeline.clear(CLOCK_ID);
     if (unsubscribe) {
         try {

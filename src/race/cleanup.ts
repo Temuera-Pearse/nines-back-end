@@ -2,6 +2,9 @@ import { MasterTimeline } from '../timeline/masterTimeline.js'
 import { activeRaces } from './activeRaceMemory.js'
 import { RaceState } from './raceState.js'
 import { logEvent } from '../utils/logEvent.js'
+import { getRaceRepository } from '../db/raceRepository.js'
+
+const raceRepository = getRaceRepository()
 
 export function releaseRace(raceId: string): void {
   try {
@@ -20,6 +23,7 @@ export function releaseRace(raceId: string): void {
       // both precomputed and currentRace in one step.
       RaceState.completeRace()
     }
+    void raceRepository.markRaceArchived(raceId).catch(() => {})
     logEvent('cleanup:released', { raceId })
   } catch (e: any) {
     logEvent('cleanup:error', { raceId, error: e?.message ?? String(e) })

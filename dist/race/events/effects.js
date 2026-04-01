@@ -11,6 +11,19 @@ const NEGATIVE_EVENT_IDS = new Set([
     'ufo_abduction',
     'chain_reaction',
 ]);
+const AREA_OF_EFFECT_EVENT_WIDTH = new Map([
+    ['ice_patch', 3],
+    ['earthquake', 5],
+    ['tidal_wave', 5],
+    ['meteor_strike', 3],
+    ['tornado', 3],
+]);
+const MULTI_TARGET_EVENT_LIMIT = new Map([
+    ['bomb_throw', 3],
+    ['smg_attack', 1],
+    ['aerial_duel', 2],
+    ['magnet_pull', 1],
+]);
 // Utility: deterministic single index from instanceId
 function pickIndex(instance, count, salt = '') {
     const h = hashStringToInt(`${instance.instanceId}${salt}`);
@@ -24,6 +37,26 @@ function pickTwoDistinct(instance, count) {
     const b = bRaw >= a ? bRaw + 1 : bRaw;
     return [a, b];
 }
+function pickHorseIds(instance, horseIds, limit, salt = '') {
+    return horseIds
+        .map((horseId) => ({
+        horseId,
+        score: hashStringToInt(`${instance.instanceId}:${salt}:${horseId}`),
+    }))
+        .sort((a, b) => a.score - b.score || a.horseId.localeCompare(b.horseId))
+        .slice(0, Math.max(0, limit))
+        .map(({ horseId }) => horseId);
+}
+function pickAreaOfEffectHorseIds(instance, horseIds, width, salt = '') {
+    if (horseIds.length === 0 || width <= 0)
+        return [];
+    const clampedWidth = Math.min(width, horseIds.length);
+    const anchorIndex = pickIndex(instance, horseIds.length, salt);
+    const radius = Math.floor(clampedWidth / 2);
+    const start = Math.max(0, anchorIndex - radius);
+    const end = Math.min(horseIds.length - 1, anchorIndex + radius);
+    return horseIds.slice(start, end + 1);
+}
 // Optional polish: clearer label for global stun from chain_reaction
 const CHAIN_STUN_ID = 'chain_stun';
 /**
@@ -36,6 +69,10 @@ export function applyEventEffects(baseHorsePaths, eventTimeline, eventCatalog) {
         return Object.freeze([]);
     const horsesAt0 = baseHorsePaths[0];
     const horseIds = horsesAt0.map((h) => h.horseId);
+    const finishLine = baseHorsePaths.reduce((maxAtAllTicks, tickStates) => {
+        const tickMax = tickStates.reduce((maxAtTick, state) => Math.max(maxAtTick, state.position), 0);
+        return Math.max(maxAtAllTicks, tickMax);
+    }, 0);
     const catalogOrder = new Map();
     eventCatalog.forEach((d, i) => catalogOrder.set(d.id, i));
     const defById = new Map();
@@ -107,14 +144,34 @@ export function applyEventEffects(baseHorsePaths, eventTimeline, eventCatalog) {
                 continue;
             }
             if (ev.id === 'chain_reaction') {
-                // Global stun: preserve behavior; semantic tag clarity
-                for (const bt of baseAtTick) {
-                    if (removed.get(bt.horseId))
-                        continue;
+                const affectedHorseIds = pickHorseIds(ev, baseAtTick
+                    .map((bt) => bt.horseId)
+                    .filter((horseId) => !removed.get(horseId)), 4, 'chain-reaction');
+                for (const horseId of affectedHorseIds) {
                     const endTick = tick + OFFSETS.chainStunDuration;
-                    stunUntil.set(bt.horseId, Math.max(stunUntil.get(bt.horseId) ?? tick, endTick));
-                    markActive(bt.horseId, CHAIN_STUN_ID, tick, endTick, activeEventsWindows);
-                    markActive(bt.horseId, ev.id, tick, tick + (def.durationTicks || 0), activeEventsWindows);
+                    stunUntil.set(horseId, Math.max(stunUntil.get(horseId) ?? tick, endTick));
+                    markActive(horseId, CHAIN_STUN_ID, tick, endTick, activeEventsWindows);
+                    markActive(horseId, ev.id, tick, tick + (def.durationTicks || 0), activeEventsWindows);
+                }
+                continue;
+            }
+            const areaOfEffectWidth = AREA_OF_EFFECT_EVENT_WIDTH.get(ev.id);
+            if (areaOfEffectWidth !== undefined) {
+                const affectedHorseIds = pickAreaOfEffectHorseIds(ev, baseAtTick
+                    .map((bt) => bt.horseId)
+                    .filter((horseId) => !removed.get(horseId)), areaOfEffectWidth, `${ev.id}-aoe`);
+                for (const horseId of affectedHorseIds) {
+                    applyEffect(ev, def, horseId, tick, stunUntil, activeEventsWindows);
+                }
+                continue;
+            }
+            const multiTargetLimit = MULTI_TARGET_EVENT_LIMIT.get(ev.id);
+            if (multiTargetLimit !== undefined) {
+                const affectedHorseIds = pickHorseIds(ev, baseAtTick
+                    .map((bt) => bt.horseId)
+                    .filter((horseId) => !removed.get(horseId)), multiTargetLimit, `${ev.id}-limit`);
+                for (const horseId of affectedHorseIds) {
+                    applyEffect(ev, def, horseId, tick, stunUntil, activeEventsWindows);
                 }
                 continue;
             }
@@ -182,7 +239,7 @@ export function applyEventEffects(baseHorsePaths, eventTimeline, eventCatalog) {
                     finalLane = baseHorsePaths[tick][otherIdx].lane;
                 }
             }
-            let finalPos = candidatePos;
+            let finalPos = Math.min(finishLine, candidatePos);
             let finalSpeed = wasRemoved ? 0 : base.speed;
             if (wasRemoved) {
                 // Removed horses freeze position and speed from last final; no new effects apply after removal

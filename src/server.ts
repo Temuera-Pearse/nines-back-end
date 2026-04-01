@@ -20,6 +20,10 @@ import { startLeaderElection } from './leader/elector.js'
 import { rateLimit } from './utils/rateLimit.js'
 import { initCloudWatch, pushMetrics } from './metrics/cloudwatch.js'
 import helmet from 'helmet'
+import { closePool, verifyPool } from './db/pool.js'
+import userRoutes from './api/userRoutes.js'
+import betRoutes from './api/betRoutes.js'
+import settlementRoutes from './api/settlementRoutes.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -37,6 +41,9 @@ app.use(rateLimit({ windowMs: 10000, max: 200 }))
 
 // Routes
 app.use('/race', raceRoutes)
+app.use('/users', userRoutes)
+app.use('/bets', betRoutes)
+app.use('/settlements', settlementRoutes)
 
 // Prometheus metrics
 const collectDefaultMetrics = client.collectDefaultMetrics
@@ -135,13 +142,23 @@ startWatchdog()
 // Start lifecycle driver (ticks RaceStateMachine; starts engine only during race_running)
 startCycleClock()
 
-// Start server
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`)
-  console.log(`WebSocket server ready`)
-  console.log(`Engine loop started`)
-  initCloudWatch()
-})
+async function startServer(): Promise<void> {
+  try {
+    await verifyPool()
+  } catch (e) {
+    console.error(`Database verification failed: ${String(e)}`)
+    process.exit(1)
+  }
+
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`)
+    console.log(`WebSocket server ready`)
+    console.log(`Engine loop started`)
+    initCloudWatch()
+  })
+}
+
+void startServer()
 
 // Leader election using Redis (optional)
 if (process.env.LEADER_ELECTION === '1') {
@@ -162,8 +179,10 @@ process.on('SIGTERM', () => {
   stopEngine()
   MasterTimeline.shutdown()
   server.close(() => {
-    console.log('Server closed')
-    process.exit(0)
+    void closePool().finally(() => {
+      console.log('Server closed')
+      process.exit(0)
+    })
   })
 })
 
@@ -174,7 +193,9 @@ process.on('SIGINT', () => {
   stopEngine()
   MasterTimeline.shutdown()
   server.close(() => {
-    console.log('Server closed')
-    process.exit(0)
+    void closePool().finally(() => {
+      console.log('Server closed')
+      process.exit(0)
+    })
   })
 })

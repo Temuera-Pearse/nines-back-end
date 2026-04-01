@@ -58,6 +58,18 @@ npm install
 npm run dev
 ```
 
+If you are using the alpha Postgres metadata layer, apply migrations first:
+
+```bash
+DATABASE_URL=postgres://localhost:5432/nines_dev npm run db:migrate
+```
+
+Backfill existing archived races into Postgres metadata with:
+
+```bash
+DATABASE_URL=postgres://localhost:5432/nines_dev npm run db:backfill:races
+```
+
 2. Open the health check:
 
 ```bash
@@ -171,6 +183,25 @@ Tip: You can use curl or your browser to inspect these endpoints.
   - `ticks.json` (optional raw tick stream; may be partial).
 - If any write fails, an `UNSAVED.flag` is created for that race and errors are logged.
 - On restart, the engine performs recovery to resume streaming and keep the current seed consistent.
+
+## Alpha Primary DB
+
+- Alpha introduces a relational primary DB for durable race metadata and artifact references.
+- Live race authority, active race memory, reconnect buffers, and websocket session state remain in memory.
+- Heavy race artifacts remain outside the DB and are referenced from it.
+
+Environment variables:
+
+- `DATABASE_URL`: Postgres connection string for the alpha metadata database.
+- `RACE_DATA_DIR`: optional override for local artifact storage. Use this to move race data outside the repo tree.
+- `PERSIST_S3_BUCKET`: optional artifact storage bucket. When set, artifact files are written to S3 instead of local disk.
+- `PERSIST_S3_PREFIX`: optional object key prefix for S3-backed artifacts.
+
+Artifacts and metadata can be backfilled from the existing local race archive with:
+
+```bash
+npm run db:backfill:races
+```
 
 ## Configuration and Conventions
 

@@ -38,6 +38,46 @@ export interface Race {
     placements: Horse[];
     lastBroadcastedTick: number;
 }
+export interface LiveRaceEvent {
+    id: string;
+    instanceId: string;
+    tickIndex: number;
+    affectedHorseIds: string[];
+}
+export interface LiveHorseEffect {
+    horseId: string;
+    activeEventIds: string[];
+    isStunned: boolean;
+    isRemoved: boolean;
+}
+export interface RaceFinishPresentation {
+    bannerVisibleUntilUtc: string;
+    resultsVisibleUntilUtc: string;
+}
+export interface RaceFinishPayload {
+    raceId: string;
+    timestampUtc: string;
+    winnerId: string;
+    finishOrder: string[];
+    finishTimesMs: Record<string, number>;
+    finishTickIndex: Record<string, number>;
+    presentation: RaceFinishPresentation;
+}
+export interface RaceWinnerDeclaredPayload {
+    raceId: string;
+    timestampUtc: string;
+    winnerId: string;
+    finishOrder: string[];
+    finishTimesMs: Record<string, number>;
+    finishTickIndex: Record<string, number>;
+    presentation: Pick<RaceFinishPresentation, 'bannerVisibleUntilUtc' | 'resultsVisibleUntilUtc'>;
+}
+export interface RaceFrameData {
+    positions?: number[];
+    deltas?: number[];
+    events?: LiveRaceEvent[];
+    effects?: LiveHorseEffect[];
+}
 /**
  * WebSocket message types
  */
@@ -65,12 +105,19 @@ export type WebSocketMessage = {
     seq?: number;
     tickIndex: number;
     tickTs?: number;
-    data: {
-        positions?: number[];
-        deltas?: number[];
-    };
+    data: RaceFrameData;
     sig?: string;
     keyId?: string;
+} | {
+    type: 'race:winner-declared';
+    protoVer?: number;
+    raceId: string;
+    timestampUtc: string;
+    winnerId: string;
+    finishOrder: string[];
+    finishTimesMs: Record<string, number>;
+    finishTickIndex: Record<string, number>;
+    presentation: Pick<RaceFinishPresentation, 'bannerVisibleUntilUtc' | 'resultsVisibleUntilUtc'>;
 } | {
     type: 'race:finish';
     protoVer?: number;
@@ -78,6 +125,9 @@ export type WebSocketMessage = {
     timestampUtc: string;
     winnerId: string;
     finishOrder: string[];
+    finishTimesMs: Record<string, number>;
+    finishTickIndex: Record<string, number>;
+    presentation: RaceFinishPresentation;
 } | {
     type: 'race:catchup';
     protoVer: number;
@@ -91,9 +141,7 @@ export type WebSocketMessage = {
         seq: number;
         tickIndex: number;
         tickTs: number;
-        data: {
-            positions: number[];
-        };
+        data: RaceFrameData;
     }>;
 } | {
     type: 'race:sync-complete';
@@ -143,6 +191,7 @@ export interface PrecomputedRace {
     finishTimesMs: Record<string, number>;
     /** New: exact tick index at which each horse crosses the finish (floor of crossingMs/dtMs) */
     finishTickIndex: Record<string, number>;
+    authoritativeFinish?: RaceFinishPayload;
     startTime?: Date;
     endTime?: Date;
     checksum?: string;

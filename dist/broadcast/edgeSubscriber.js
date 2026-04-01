@@ -1,5 +1,6 @@
 import { getBus } from './bus.js';
 import { RaceWebSocketServer } from '../websocket/wsServer.js';
+import { engineMetrics } from '../metrics/engineMetrics.js';
 export async function startEdgeSubscriber() {
     const topicPrefix = 'race.';
     // For simplicity, subscribe to a wildcard of all races if bus supports it; otherwise, list of known topics.
@@ -10,6 +11,10 @@ export async function startEdgeSubscriber() {
     const handler = (msg) => {
         try {
             const obj = JSON.parse(msg.toString('utf8'));
+            const tickTs = typeof obj?.tickTs === 'number' ? obj.tickTs : null;
+            if (tickTs !== null) {
+                engineMetrics.recordEdgeRebroadcast(Date.now() - tickTs);
+            }
             RaceWebSocketServer.broadcast(obj);
         }
         catch {

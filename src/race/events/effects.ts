@@ -39,6 +39,21 @@ const NEGATIVE_EVENT_IDS = new Set<string>([
   'chain_reaction',
 ])
 
+const AREA_OF_EFFECT_EVENT_WIDTH = new Map<string, number>([
+  ['ice_patch', 3],
+  ['earthquake', 5],
+  ['tidal_wave', 5],
+  ['meteor_strike', 3],
+  ['tornado', 3],
+])
+
+const MULTI_TARGET_EVENT_LIMIT = new Map<string, number>([
+  ['bomb_throw', 3],
+  ['smg_attack', 1],
+  ['aerial_duel', 2],
+  ['magnet_pull', 1],
+])
+
 // Utility: deterministic single index from instanceId
 function pickIndex(instance: EventInstance, count: number, salt = ''): number {
   const h = hashStringToInt(`${instance.instanceId}${salt}`)
@@ -46,13 +61,46 @@ function pickIndex(instance: EventInstance, count: number, salt = ''): number {
 }
 function pickTwoDistinct(
   instance: EventInstance,
-  count: number
+  count: number,
 ): [number, number] {
   if (count <= 1) return [0, 0]
   const a = pickIndex(instance, count, 'A')
   const bRaw = pickIndex(instance, count - 1, 'B')
   const b = bRaw >= a ? bRaw + 1 : bRaw
   return [a, b]
+}
+
+function pickHorseIds(
+  instance: EventInstance,
+  horseIds: ReadonlyArray<string>,
+  limit: number,
+  salt = '',
+): ReadonlyArray<string> {
+  return horseIds
+    .map((horseId) => ({
+      horseId,
+      score: hashStringToInt(`${instance.instanceId}:${salt}:${horseId}`),
+    }))
+    .sort((a, b) => a.score - b.score || a.horseId.localeCompare(b.horseId))
+    .slice(0, Math.max(0, limit))
+    .map(({ horseId }) => horseId)
+}
+
+function pickAreaOfEffectHorseIds(
+  instance: EventInstance,
+  horseIds: ReadonlyArray<string>,
+  width: number,
+  salt = '',
+): ReadonlyArray<string> {
+  if (horseIds.length === 0 || width <= 0) return []
+
+  const clampedWidth = Math.min(width, horseIds.length)
+  const anchorIndex = pickIndex(instance, horseIds.length, salt)
+  const radius = Math.floor(clampedWidth / 2)
+  const start = Math.max(0, anchorIndex - radius)
+  const end = Math.min(horseIds.length - 1, anchorIndex + radius)
+
+  return horseIds.slice(start, end + 1)
 }
 
 // 1) Explicit timing: include startTick
@@ -69,12 +117,19 @@ const CHAIN_STUN_ID = 'chain_stun'
 export function applyEventEffects(
   baseHorsePaths: Readonly<HorsePathMatrix>,
   eventTimeline: Readonly<EventTimeline>,
-  eventCatalog: Readonly<EventDefinition[]>
+  eventCatalog: Readonly<EventDefinition[]>,
 ): FinalHorseStateMatrix {
   const totalTicks = baseHorsePaths.length
   if (totalTicks === 0) return Object.freeze([]) as FinalHorseStateMatrix
   const horsesAt0 = baseHorsePaths[0]
   const horseIds = horsesAt0.map((h) => h.horseId)
+  const finishLine = baseHorsePaths.reduce((maxAtAllTicks, tickStates) => {
+    const tickMax = tickStates.reduce(
+      (maxAtTick, state) => Math.max(maxAtTick, state.position),
+      0,
+    )
+    return Math.max(maxAtAllTicks, tickMax)
+  }, 0)
 
   const catalogOrder = new Map<string, number>()
   eventCatalog.forEach((d, i) => catalogOrder.set(d.id, i))
@@ -90,7 +145,7 @@ export function applyEventEffects(
   for (const h of horseIds)
     prevFinalPosition.set(
       h,
-      baseHorsePaths[0].find((x) => x.horseId === h)?.position ?? 0
+      baseHorsePaths[0].find((x) => x.horseId === h)?.position ?? 0,
     )
 
   const result: FinalHorseStateTick[][] = new Array(totalTicks)
@@ -153,34 +208,69 @@ export function applyEventEffects(
           ev.id,
           tick,
           Number.POSITIVE_INFINITY,
-          activeEventsWindows
+          activeEventsWindows,
         )
         continue
       }
 
       if (ev.id === 'chain_reaction') {
-        // Global stun: preserve behavior; semantic tag clarity
-        for (const bt of baseAtTick) {
-          if (removed.get(bt.horseId)) continue
+        const affectedHorseIds = pickHorseIds(
+          ev,
+          baseAtTick
+            .map((bt) => bt.horseId)
+            .filter((horseId) => !removed.get(horseId)),
+          4,
+          'chain-reaction',
+        )
+
+        for (const horseId of affectedHorseIds) {
           const endTick = tick + OFFSETS.chainStunDuration
           stunUntil.set(
-            bt.horseId,
-            Math.max(stunUntil.get(bt.horseId) ?? tick, endTick)
+            horseId,
+            Math.max(stunUntil.get(horseId) ?? tick, endTick),
           )
+          markActive(horseId, CHAIN_STUN_ID, tick, endTick, activeEventsWindows)
           markActive(
-            bt.horseId,
-            CHAIN_STUN_ID,
-            tick,
-            endTick,
-            activeEventsWindows
-          )
-          markActive(
-            bt.horseId,
+            horseId,
             ev.id,
             tick,
             tick + (def.durationTicks || 0),
-            activeEventsWindows
+            activeEventsWindows,
           )
+        }
+        continue
+      }
+
+      const areaOfEffectWidth = AREA_OF_EFFECT_EVENT_WIDTH.get(ev.id)
+      if (areaOfEffectWidth !== undefined) {
+        const affectedHorseIds = pickAreaOfEffectHorseIds(
+          ev,
+          baseAtTick
+            .map((bt) => bt.horseId)
+            .filter((horseId) => !removed.get(horseId)),
+          areaOfEffectWidth,
+          `${ev.id}-aoe`,
+        )
+
+        for (const horseId of affectedHorseIds) {
+          applyEffect(ev, def, horseId, tick, stunUntil, activeEventsWindows)
+        }
+        continue
+      }
+
+      const multiTargetLimit = MULTI_TARGET_EVENT_LIMIT.get(ev.id)
+      if (multiTargetLimit !== undefined) {
+        const affectedHorseIds = pickHorseIds(
+          ev,
+          baseAtTick
+            .map((bt) => bt.horseId)
+            .filter((horseId) => !removed.get(horseId)),
+          multiTargetLimit,
+          `${ev.id}-limit`,
+        )
+
+        for (const horseId of affectedHorseIds) {
+          applyEffect(ev, def, horseId, tick, stunUntil, activeEventsWindows)
         }
         continue
       }
@@ -255,7 +345,7 @@ export function applyEventEffects(
               'hook_shot',
               tick,
               activeEventsWindows,
-              true
+              true,
             )
           ) {
             otherOffset -= OFFSETS.hookShotBackward
@@ -266,21 +356,21 @@ export function applyEventEffects(
               'rocket_boost',
               tick,
               activeEventsWindows,
-              true
+              true,
             )
           ) {
             otherOffset += OFFSETS.rocketBoostForward
           }
           candidatePos = Math.max(
             0,
-            otherPrevFinal + otherMoveDelta + otherOffset
+            otherPrevFinal + otherMoveDelta + otherOffset,
           )
           // Deterministic rule: lanes swap during position_swap
           finalLane = baseHorsePaths[tick][otherIdx].lane
         }
       }
 
-      let finalPos = candidatePos
+      let finalPos = Math.min(finishLine, candidatePos)
       let finalSpeed = wasRemoved ? 0 : base.speed
       if (wasRemoved) {
         // Removed horses freeze position and speed from last final; no new effects apply after removal
@@ -324,7 +414,7 @@ export function applyEventEffects(
     horseId: string,
     tick: number,
     stunUntilMap: Map<string, number>,
-    active: Map<string, ActiveWindow[]>
+    active: Map<string, ActiveWindow[]>,
   ) {
     const endTick = tick + def.durationTicks
     markActive(horseId, ev.id, tick, endTick, active)
@@ -332,7 +422,7 @@ export function applyEventEffects(
     if (ev.id === 'bomb_throw') {
       stunUntilMap.set(
         horseId,
-        Math.max(stunUntilMap.get(horseId) ?? tick, endTick)
+        Math.max(stunUntilMap.get(horseId) ?? tick, endTick),
       )
     }
     // hook_shot and rocket_boost: instantaneous offsets at start tick handled in render
@@ -344,7 +434,7 @@ export function applyEventEffects(
     id: string,
     startTick: number,
     endTick: number,
-    active: Map<string, ActiveWindow[]>
+    active: Map<string, ActiveWindow[]>,
   ) {
     const arr = active.get(horseId) ?? []
     arr.push({ id, startTick, endTick })
@@ -356,7 +446,7 @@ export function applyEventEffects(
     id: string,
     tick: number,
     active: Map<string, ActiveWindow[]>,
-    onlyStartAtTick = false
+    onlyStartAtTick = false,
   ): boolean {
     const arr = active.get(horseId)
     if (!arr) return false
@@ -365,7 +455,7 @@ export function applyEventEffects(
       return arr.some((w) => w.id === id && w.startTick === tick)
     }
     return arr.some(
-      (w) => w.id === id && tick >= w.startTick && tick < w.endTick
+      (w) => w.id === id && tick >= w.startTick && tick < w.endTick,
     )
   }
 }

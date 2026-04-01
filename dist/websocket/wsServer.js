@@ -6,6 +6,7 @@ import { getPublicKeyId, isSigningEnabled, signBytes } from '../utils/signer';
 import { URL } from 'url';
 import { getBus } from '../broadcast/bus.js';
 import { getLeaderRole } from '../leader/elector.js';
+import { performance } from 'perf_hooks';
 const ts = () => new Date().toISOString();
 const PROTO_VER = Number(process.env.PROTO_VER || 1);
 // Catch-up window/rate limit constants
@@ -33,17 +34,57 @@ function getCurrentTickIndex(raceId) {
         return -1;
     return typeof rec.currentTickIndex === 'number' ? rec.currentTickIndex : -1;
 }
+function buildWinnerDeclaredPayload(pre) {
+    if (!pre.startTime || !pre.winnerId)
+        return null;
+    const winnerCrossMs = pre.finishTimesMs[pre.winnerId];
+    if (!Number.isFinite(winnerCrossMs))
+        return null;
+    const timestampMs = pre.startTime.getTime() + winnerCrossMs;
+    return {
+        raceId: pre.id,
+        timestampUtc: new Date(timestampMs).toISOString(),
+        winnerId: pre.winnerId,
+        finishOrder: [...pre.finishOrder],
+        finishTimesMs: { ...pre.finishTimesMs },
+        finishTickIndex: { ...pre.finishTickIndex },
+        presentation: {
+            bannerVisibleUntilUtc: new Date(timestampMs + 3400).toISOString(),
+            resultsVisibleUntilUtc: pre.authoritativeFinish?.presentation
+                .resultsVisibleUntilUtc
+                ? pre.authoritativeFinish.presentation.resultsVisibleUntilUtc
+                : new Date(Math.ceil(timestampMs / 60_000) * 60_000).toISOString(),
+        },
+    };
+}
+function maybeReplayWinnerDeclared(ws, pre, currentTickIndex) {
+    const winnerTickIndex = pre.finishTickIndex[pre.winnerId] ?? Number.POSITIVE_INFINITY;
+    if (currentTickIndex < winnerTickIndex)
+        return;
+    const payload = buildWinnerDeclaredPayload(pre);
+    if (!payload)
+        return;
+    ws.send(JSON.stringify({
+        type: 'race:winner-declared',
+        protoVer: PROTO_VER,
+        ...payload,
+    }));
+}
 // Handle sync requests from clients
 function handleSyncRequest(ws, msg) {
+    const startedAt = performance.now();
+    engineMetrics.recordSyncRequest();
     const now = Date.now();
     const last = lastSyncByClient.get(ws) ?? 0;
     if (now - last < SYNC_COOLDOWN_MS) {
         // rate-limited
+        engineMetrics.recordSyncRateLimited();
         return;
     }
     lastSyncByClient.set(ws, now);
     const raceId = msg?.raceId;
     if (!raceId || !activeRaces.has(raceId)) {
+        engineMetrics.recordSyncError();
         ws.send(JSON.stringify({ type: 'error', message: 'invalid raceId' }));
         return;
     }
@@ -68,7 +109,11 @@ function handleSyncRequest(ws, msg) {
         seq: typeof t.seq === 'number' ? t.seq : t.tickIndex,
         tickIndex: t.tickIndex,
         tickTs: typeof t.tickTs === 'number' ? t.tickTs : nowMs,
-        data: { positions: t.positions },
+        data: {
+            positions: t.positions,
+            events: t.events,
+            effects: t.effects,
+        },
     }));
     ws.send(JSON.stringify({
         type: 'race:catchup',
@@ -84,6 +129,11 @@ function handleSyncRequest(ws, msg) {
         raceId,
         currentTickIndex,
     }));
+    const pre = RaceState.findPrecomputedById(raceId);
+    if (pre && !pre.endTime) {
+        maybeReplayWinnerDeclared(ws, pre, currentTickIndex);
+    }
+    engineMetrics.recordCatchupWindow(tickFrames.length, performance.now() - startedAt);
 }
 /**
  * WebSocket server for real-time race updates
@@ -144,6 +194,21 @@ export class RaceWebSocketServer {
                     config: pre.config,
                     currentTickIndex,
                 }));
+                if (!pre.endTime) {
+                    maybeReplayWinnerDeclared(ws, pre, currentTickIndex);
+                }
+                // If the race has already finished (client joined during results window),
+                // replay race:finish so they can show the podium without waiting.
+                if (pre.endTime) {
+                    const finish = pre.authoritativeFinish;
+                    if (finish) {
+                        ws.send(JSON.stringify({
+                            type: 'race:finish',
+                            protoVer: PROTO_VER,
+                            ...finish,
+                        }));
+                    }
+                }
             }
             ws.on('message', (data) => {
                 let msg;
@@ -196,6 +261,7 @@ export class RaceWebSocketServer {
         this.role = role;
     }
     static broadcast(message) {
+        const broadcastStartedAt = performance.now();
         const type = message?.type ?? 'unknown';
         const raceId = message?.raceId ??
             message?.data?.raceId ??
@@ -240,7 +306,9 @@ export class RaceWebSocketServer {
             }
         }
         // Ensure protoVer exists on all outgoing JSON frames
-        if (payloadObj && typeof payloadObj === 'object' && payloadObj.protoVer === undefined) {
+        if (payloadObj &&
+            typeof payloadObj === 'object' &&
+            payloadObj.protoVer === undefined) {
             payloadObj = { ...payloadObj, protoVer: PROTO_VER };
         }
         // Serialize (without signature) for signing + size
@@ -287,6 +355,10 @@ export class RaceWebSocketServer {
                         tickTs: payloadObj.tickTs,
                         tickIndex,
                         protoVer: PROTO_VER,
+                        data: {
+                            events: payloadObj?.data?.events,
+                            effects: payloadObj?.data?.effects,
+                        },
                     }));
                     const arr = new Float32Array(positions);
                     const body = Buffer.from(arr.buffer);
@@ -342,6 +414,11 @@ export class RaceWebSocketServer {
             }
             catch { }
         }
+        if (type === 'race:tick' ||
+            type === 'race:keyframe' ||
+            type === 'race:delta') {
+            engineMetrics.recordFanout(performance.now() - broadcastStartedAt);
+        }
         // Optional bus publish (SOT fan-out) leader only
         try {
             if (isLeader &&
@@ -350,9 +427,15 @@ export class RaceWebSocketServer {
                     type === 'race:keyframe' ||
                     type === 'race:delta')) {
                 const topic = `race.${raceId}`;
+                const publishStartedAt = performance.now();
                 getBus()
                     .publish(topic, Buffer.from(payloadJson))
-                    .catch(() => { });
+                    .then(() => {
+                    engineMetrics.recordBusPublish(performance.now() - publishStartedAt);
+                })
+                    .catch(() => {
+                    engineMetrics.recordBusPublishError(performance.now() - publishStartedAt);
+                });
             }
         }
         catch { }

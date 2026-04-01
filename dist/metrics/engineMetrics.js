@@ -17,19 +17,24 @@ class Ring {
     }
     stats() {
         if (this.filled === 0)
-            return { count: 0, avg: 0, max: 0 };
+            return { count: 0, avg: 0, max: 0, p95: 0 };
         let sum = 0;
         let max = -Infinity;
+        const values = [];
         for (let k = 0; k < this.filled; k++) {
             const v = this.buf[k];
             sum += v;
             if (v > max)
                 max = v;
+            values.push(v);
         }
+        values.sort((a, b) => a - b);
+        const p95Index = Math.min(values.length - 1, Math.max(0, Math.ceil(values.length * 0.95) - 1));
         return {
             count: this.filled,
             avg: sum / this.filled,
             max: max === -Infinity ? 0 : max,
+            p95: values[p95Index] ?? 0,
         };
     }
     clear() {
@@ -68,6 +73,17 @@ export class EngineMetrics {
     wsDroppedTickFrames = 0;
     wsBufferedRing = new Ring(200);
     latestSeqByRace = new Map();
+    wsSyncRequests = 0;
+    wsSyncRateLimited = 0;
+    wsSyncErrors = 0;
+    wsCatchupTicksServed = 0;
+    wsCatchupServiceMs = new Ring(200);
+    wsFanoutMs = new Ring(200);
+    wsBusPublishSuccess = 0;
+    wsBusPublishErrors = 0;
+    wsBusPublishMs = new Ring(200);
+    wsEdgeRebroadcasts = 0;
+    wsEdgeInputLagMs = new Ring(200);
     constructor() {
         // Optional GC observer (negligible overhead)
         try {
@@ -168,6 +184,25 @@ export class EngineMetrics {
                 droppedTickFrames: this.wsDroppedTickFrames,
                 avgBufferedAmount: this.wsBufferedRing.stats().avg,
                 latestSeqByRace: Object.freeze(Object.fromEntries(this.latestSeqByRace.entries())),
+                sync: Object.freeze({
+                    requests: this.wsSyncRequests,
+                    rateLimited: this.wsSyncRateLimited,
+                    errors: this.wsSyncErrors,
+                    catchupTicksServed: this.wsCatchupTicksServed,
+                    catchupServiceMs: this.wsCatchupServiceMs.stats(),
+                }),
+                broadcast: Object.freeze({
+                    fanoutMs: this.wsFanoutMs.stats(),
+                }),
+                bus: Object.freeze({
+                    publishSuccess: this.wsBusPublishSuccess,
+                    publishErrors: this.wsBusPublishErrors,
+                    publishLatencyMs: this.wsBusPublishMs.stats(),
+                }),
+                edge: Object.freeze({
+                    rebroadcasts: this.wsEdgeRebroadcasts,
+                    inputLagMs: this.wsEdgeInputLagMs.stats(),
+                }),
             }),
             gc: Object.freeze({
                 minorCount: this.gcMinor,
@@ -181,7 +216,7 @@ export class EngineMetrics {
                 lastMs: this.preLastMs,
                 avgMs: this.preCount ? this.preSumMs / this.preCount : 0,
                 count: this.preCount,
-                phases: Object.freeze(this.prePhasesLast),
+                phases: Object.freeze({ ...this.prePhasesLast }),
             }),
         };
         return Object.freeze(snap);
@@ -198,6 +233,18 @@ export class EngineMetrics {
         this.preLastMs = 0;
         this.preSumMs = 0;
         this.preCount = 0;
+        this.prePhasesLast = Object.create(null);
+        this.wsSyncRequests = 0;
+        this.wsSyncRateLimited = 0;
+        this.wsSyncErrors = 0;
+        this.wsCatchupTicksServed = 0;
+        this.wsCatchupServiceMs.clear();
+        this.wsFanoutMs.clear();
+        this.wsBusPublishSuccess = 0;
+        this.wsBusPublishErrors = 0;
+        this.wsBusPublishMs.clear();
+        this.wsEdgeRebroadcasts = 0;
+        this.wsEdgeInputLagMs.clear();
         this.events.emit('metrics:reset');
     }
     // WS metrics APIs
@@ -209,6 +256,34 @@ export class EngineMetrics {
     }
     recordBufferedAmount(bytes) {
         this.wsBufferedRing.push(bytes);
+    }
+    recordSyncRequest() {
+        this.wsSyncRequests++;
+    }
+    recordSyncRateLimited() {
+        this.wsSyncRateLimited++;
+    }
+    recordSyncError() {
+        this.wsSyncErrors++;
+    }
+    recordCatchupWindow(ticksServed, durationMs) {
+        this.wsCatchupTicksServed += ticksServed;
+        this.wsCatchupServiceMs.push(durationMs);
+    }
+    recordFanout(durationMs) {
+        this.wsFanoutMs.push(durationMs);
+    }
+    recordBusPublish(durationMs) {
+        this.wsBusPublishSuccess++;
+        this.wsBusPublishMs.push(durationMs);
+    }
+    recordBusPublishError(durationMs) {
+        this.wsBusPublishErrors++;
+        this.wsBusPublishMs.push(durationMs);
+    }
+    recordEdgeRebroadcast(inputLagMs) {
+        this.wsEdgeRebroadcasts++;
+        this.wsEdgeInputLagMs.push(inputLagMs);
     }
     setLatestSeq(raceId, seq) {
         this.latestSeqByRace.set(raceId, seq);

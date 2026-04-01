@@ -1,11 +1,27 @@
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
+const { raceReadServiceMock } = vi.hoisted(() => ({
+    raceReadServiceMock: {
+        getCurrentRaceSummary: vi.fn(async () => null),
+        getPreviousRaceSummary: vi.fn(async () => null),
+        getRaceHistory: vi.fn(async () => []),
+        getRaceResults: vi.fn(async () => null),
+        getTimeline: vi.fn(async () => null),
+        getFinalTicks: vi.fn(async () => null),
+        getRawTicks: vi.fn(async () => null),
+    },
+}));
 // ESM mocking: mock signer before importing routes
 vi.mock('../utils/signer.js', () => {
     return {
         getPublicKey: () => 'TEST_PUBLIC_KEY_PEM',
         getPublicKeyId: () => 'test-key-id',
+    };
+});
+vi.mock('../services/raceReadService.js', () => {
+    return {
+        getRaceReadService: () => raceReadServiceMock,
     };
 });
 import raceRoutes from './raceRoutes.js';
@@ -20,6 +36,13 @@ beforeEach(() => {
     savedEnv = { ...process.env };
     process.env.REQUIRE_API_TOKEN = '0';
     delete process.env.API_TOKEN;
+    raceReadServiceMock.getCurrentRaceSummary.mockResolvedValue(null);
+    raceReadServiceMock.getPreviousRaceSummary.mockResolvedValue(null);
+    raceReadServiceMock.getRaceHistory.mockResolvedValue([]);
+    raceReadServiceMock.getRaceResults.mockResolvedValue(null);
+    raceReadServiceMock.getTimeline.mockResolvedValue(null);
+    raceReadServiceMock.getFinalTicks.mockResolvedValue(null);
+    raceReadServiceMock.getRawTicks.mockResolvedValue(null);
 });
 afterEach(() => {
     process.env = savedEnv;
@@ -69,7 +92,7 @@ describe('raceRoutes endpoints', () => {
     it('GET /race/current returns race summary', async () => {
         vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue({
             id: 'race-1',
-            config: { seed: 's' },
+            config: { seed: 's', dtMs: 50 },
             finishLine: 123,
             startTime: 1000,
             endTime: 2000,
@@ -78,10 +101,60 @@ describe('raceRoutes endpoints', () => {
         expect(res.status).toBe(200);
         expect(res.body).toEqual({
             raceId: 'race-1',
-            config: { seed: 's' },
+            config: { dtMs: 50 },
             finishLine: 123,
             startTime: 1000,
             endTime: 2000,
+        });
+    });
+    it('GET /race/current falls back to read service when memory is empty', async () => {
+        vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue(null);
+        raceReadServiceMock.getCurrentRaceSummary.mockResolvedValue({
+            raceId: 'race-db-1',
+            config: { seed: 'db-seed', durationMs: 20000 },
+            finishLine: 1000,
+            startTime: '2026-03-16T00:00:30.000Z',
+            endTime: '2026-03-16T00:00:50.000Z',
+        });
+        const res = await request(makeApp()).get('/race/current');
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+            raceId: 'race-db-1',
+            config: { durationMs: 20000 },
+            finishLine: 1000,
+            startTime: '2026-03-16T00:00:30.000Z',
+            endTime: '2026-03-16T00:00:50.000Z',
+        });
+    });
+    it('GET /race/timeline/:raceId rejects the active race artifact before betting closes', async () => {
+        vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue({
+            id: 'race-live-1',
+        });
+        vi.spyOn(RaceState, 'getStateMachine').mockReturnValue({
+            getPhaseAndSecond: () => ({ phase: 'countdown', second: 9 }),
+        });
+        const res = await request(makeApp()).get('/race/timeline/race-live-1');
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual({
+            error: 'race artifact unavailable until betting closes',
+        });
+    });
+    it('GET /race/timeline/:raceId allows historical races during countdown', async () => {
+        vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue({
+            id: 'race-live-1',
+        });
+        vi.spyOn(RaceState, 'getStateMachine').mockReturnValue({
+            getPhaseAndSecond: () => ({ phase: 'countdown', second: 9 }),
+        });
+        raceReadServiceMock.getTimeline.mockResolvedValue([
+            { tick: 1, events: [{ id: 'db-event', instanceId: 'evt-1' }] },
+        ]);
+        const res = await request(makeApp()).get('/race/timeline/race-db-4');
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+            timeline: [
+                { tick: 1, events: [{ id: 'db-event', instanceId: 'evt-1' }] },
+            ],
         });
     });
     it('GET /race/ticks/:raceId returns 404 if race missing', async () => {
@@ -89,6 +162,17 @@ describe('raceRoutes endpoints', () => {
         const res = await request(makeApp()).get('/race/ticks/nope');
         expect(res.status).toBe(404);
         expect(res.body).toEqual({ error: 'Race not found' });
+    });
+    it('GET /race/ticks/:raceId falls back to stored raw ticks when available', async () => {
+        vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue(null);
+        raceReadServiceMock.getRawTicks.mockResolvedValue([
+            { timestampOffsetMs: 0, positions: [] },
+        ]);
+        const res = await request(makeApp()).get('/race/ticks/race-db-2');
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+            ticks: [{ timestampOffsetMs: 0, positions: [] }],
+        });
     });
     it('GET /race/ticks-final/:raceId returns canonical positions', async () => {
         vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue({
@@ -104,6 +188,21 @@ describe('raceRoutes endpoints', () => {
             ticksFinal: [
                 { tickIndex: 0, positions: [1, 2] },
                 { tickIndex: 1, positions: [3, 4] },
+            ],
+        });
+    });
+    it('GET /race/ticks-final/:raceId falls back to stored artifact', async () => {
+        vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue(null);
+        raceReadServiceMock.getFinalTicks.mockResolvedValue([
+            { tickIndex: 0, positions: [10, 20] },
+            { tickIndex: 1, positions: [30, 40] },
+        ]);
+        const res = await request(makeApp()).get('/race/ticks-final/race-db-3');
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+            ticksFinal: [
+                { tickIndex: 0, positions: [10, 20] },
+                { tickIndex: 1, positions: [30, 40] },
             ],
         });
     });
@@ -137,9 +236,34 @@ describe('raceRoutes endpoints', () => {
             ],
         });
     });
+    it('GET /race/timeline/:raceId falls back to stored artifact', async () => {
+        vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue(null);
+        raceReadServiceMock.getTimeline.mockResolvedValue([
+            { tick: 1, events: [{ id: 'db-event', instanceId: 'evt-1' }] },
+        ]);
+        const res = await request(makeApp()).get('/race/timeline/race-db-4');
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+            timeline: [
+                { tick: 1, events: [{ id: 'db-event', instanceId: 'evt-1' }] },
+            ],
+        });
+    });
     it('GET /race/results/:raceId returns outcome info', async () => {
         vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue({
             id: 'race-4',
+            authoritativeFinish: {
+                raceId: 'race-4',
+                timestampUtc: '2026-03-31T12:00:20.000Z',
+                winnerId: 'h1',
+                finishOrder: ['h1', 'h2'],
+                finishTimesMs: { h1: 100, h2: 120 },
+                finishTickIndex: { h1: 2, h2: 3 },
+                presentation: {
+                    bannerVisibleUntilUtc: '2026-03-31T12:00:23.400Z',
+                    resultsVisibleUntilUtc: '2026-03-31T12:00:32.000Z',
+                },
+            },
             winnerId: 'h1',
             finishOrder: ['h1', 'h2'],
             finishTimesMs: { h1: 100, h2: 120 },
@@ -147,10 +271,71 @@ describe('raceRoutes endpoints', () => {
         const res = await request(makeApp()).get('/race/results/race-4');
         expect(res.status).toBe(200);
         expect(res.body).toEqual({
+            raceId: 'race-4',
+            timestampUtc: '2026-03-31T12:00:20.000Z',
             winnerId: 'h1',
             finishOrder: ['h1', 'h2'],
             finishTimesMs: { h1: 100, h2: 120 },
+            finishTickIndex: { h1: 2, h2: 3 },
+            presentation: {
+                bannerVisibleUntilUtc: '2026-03-31T12:00:23.400Z',
+                resultsVisibleUntilUtc: '2026-03-31T12:00:32.000Z',
+            },
+            winner: 'h1',
+            placements: ['h1', 'h2'],
         });
+    });
+    it('GET /race/results/:raceId falls back to read service when memory is empty', async () => {
+        vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue(null);
+        raceReadServiceMock.getRaceResults.mockResolvedValue({
+            raceId: 'race-db-5',
+            timestampUtc: '2026-03-31T12:00:20.000Z',
+            winnerId: 'horse-2',
+            finishOrder: ['horse-2', 'horse-5'],
+            finishTimesMs: { 'horse-2': 90, 'horse-5': 110 },
+            finishTickIndex: { 'horse-2': 1, 'horse-5': 2 },
+            presentation: {
+                bannerVisibleUntilUtc: '2026-03-31T12:00:23.400Z',
+                resultsVisibleUntilUtc: '2026-03-31T12:00:32.000Z',
+            },
+            winner: 'horse-2',
+            placements: ['horse-2', 'horse-5'],
+        });
+        const res = await request(makeApp()).get('/race/results/race-db-5');
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+            raceId: 'race-db-5',
+            timestampUtc: '2026-03-31T12:00:20.000Z',
+            winnerId: 'horse-2',
+            finishOrder: ['horse-2', 'horse-5'],
+            finishTimesMs: { 'horse-2': 90, 'horse-5': 110 },
+            finishTickIndex: { 'horse-2': 1, 'horse-5': 2 },
+            presentation: {
+                bannerVisibleUntilUtc: '2026-03-31T12:00:23.400Z',
+                resultsVisibleUntilUtc: '2026-03-31T12:00:32.000Z',
+            },
+            winner: 'horse-2',
+            placements: ['horse-2', 'horse-5'],
+        });
+    });
+    it('GET /race/history falls back to read service when memory history is empty', async () => {
+        vi.spyOn(RaceState, 'getHistory').mockReturnValue([]);
+        raceReadServiceMock.getRaceHistory.mockResolvedValue([
+            { raceId: 'race-db-6', winnerId: 'horse-1' },
+        ]);
+        const res = await request(makeApp()).get('/race/history');
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual([{ raceId: 'race-db-6', winnerId: 'horse-1' }]);
+    });
+    it('GET /race/previous falls back to read service when memory is empty', async () => {
+        vi.spyOn(RaceState, 'getPreviousRace').mockReturnValue(null);
+        raceReadServiceMock.getPreviousRaceSummary.mockResolvedValue({
+            raceId: 'race-db-7',
+            winnerId: 'horse-9',
+        });
+        const res = await request(makeApp()).get('/race/previous');
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({ raceId: 'race-db-7', winnerId: 'horse-9' });
     });
     it('GET /race/config returns public broadcast config', async () => {
         process.env.KEYFRAME_INTERVAL_TICKS = '25';

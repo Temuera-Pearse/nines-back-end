@@ -1,5 +1,6 @@
 import { getBus } from './bus.js'
 import { RaceWebSocketServer } from '../websocket/wsServer.js'
+import { engineMetrics } from '../metrics/engineMetrics.js'
 
 export async function startEdgeSubscriber(): Promise<void> {
   const topicPrefix = 'race.'
@@ -11,6 +12,10 @@ export async function startEdgeSubscriber(): Promise<void> {
   const handler = (msg: Buffer) => {
     try {
       const obj = JSON.parse(msg.toString('utf8'))
+      const tickTs = typeof obj?.tickTs === 'number' ? obj.tickTs : null
+      if (tickTs !== null) {
+        engineMetrics.recordEdgeRebroadcast(Date.now() - tickTs)
+      }
       RaceWebSocketServer.broadcast(obj)
     } catch {
       // ignore

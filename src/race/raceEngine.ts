@@ -1,6 +1,10 @@
 import {
   RaceConfig,
+  RaceFinishPayload,
+  RaceWinnerDeclaredPayload,
   HorseSeed,
+  LiveHorseEffect,
+  LiveRaceEvent,
   PrecomputedRace,
   PrecomputedTick,
   PositionUpdate,
@@ -25,7 +29,9 @@ import {
 } from './events/effects.js'
 import { determineWinner } from './winner.js'
 import type { WinnerResult } from './winner.js'
-import { FileRacePersistence } from '../persistence/racePersistence.js'
+import { getRacePersistence } from '../persistence/racePersistence.js'
+import { getRaceRepository } from '../db/raceRepository.js'
+import { getRaceArtifactRepository } from '../db/raceArtifactRepository.js'
 
 // Easing helpers for smooth curves
 const easeInQuad = (t: number) => t * t
@@ -39,29 +45,171 @@ export const TRACK_LENGTH = 1000
 const VERBOSE = process.env.LOG_VERBOSE === 'true'
 const ts = () => new Date().toISOString()
 const log = (...args: any[]) => console.log(...args)
+const FINISH_FLASH_MS = 1600
+const WINNER_BANNER_HOLD_MS = 1800
+const MIN_RESULTS_VISIBLE_MS = 8_000
+const DEFAULT_RESULTS_VISIBLE_MS = 12_000
+const MAX_SEED_RETRY_ATTEMPTS = 64
 
 let currentRace: Race | null = null
 let precomputed: PrecomputedRace | null = null
 let lastStreamedIndex: number | null = null
 let consecutiveTickFailures = 0
-const persistence = new FileRacePersistence()
+const persistence = getRacePersistence()
+const raceRepository = getRaceRepository()
+const raceArtifactRepository = getRaceArtifactRepository()
 
 // Pre-allocated positions buffer — reused every tick to avoid per-tick GC pressure.
 // Safe because RaceWebSocketServer.broadcast() is synchronous and JSON.stringify
 // captures all values before this buffer is overwritten by the next tick.
 const _posBuffer: number[] = []
 
+function deriveResultsVisibleUntilUtc(raceEndUtc: string): string {
+  const minimumVisibleUntilMs = Date.now() + MIN_RESULTS_VISIBLE_MS
+  const raceEndMs = new Date(raceEndUtc).getTime()
+
+  if (!Number.isFinite(raceEndMs)) {
+    return new Date(Date.now() + DEFAULT_RESULTS_VISIBLE_MS).toISOString()
+  }
+
+  const nextMinuteBoundaryMs = Math.ceil(raceEndMs / 60_000) * 60_000
+  const boundaryDiffMs = nextMinuteBoundaryMs - raceEndMs
+
+  if (boundaryDiffMs >= 10_000 && boundaryDiffMs <= 15_000) {
+    return new Date(
+      Math.max(nextMinuteBoundaryMs, minimumVisibleUntilMs),
+    ).toISOString()
+  }
+
+  return new Date(
+    Math.max(raceEndMs + DEFAULT_RESULTS_VISIBLE_MS, minimumVisibleUntilMs),
+  ).toISOString()
+}
+
+function buildAuthoritativeFinishPayload(
+  pre: PrecomputedRace,
+  timestamp: Date,
+): RaceFinishPayload {
+  const timestampUtc = timestamp.toISOString()
+  return {
+    raceId: pre.id,
+    timestampUtc,
+    winnerId: pre.winnerId,
+    finishOrder: [...pre.finishOrder],
+    finishTimesMs: { ...pre.finishTimesMs },
+    finishTickIndex: { ...pre.finishTickIndex },
+    presentation: {
+      bannerVisibleUntilUtc: new Date(
+        timestamp.getTime() + FINISH_FLASH_MS + WINNER_BANNER_HOLD_MS,
+      ).toISOString(),
+      resultsVisibleUntilUtc: deriveResultsVisibleUntilUtc(timestampUtc),
+    },
+  }
+}
+
+function buildWinnerDeclaredPayload(
+  pre: PrecomputedRace,
+): RaceWinnerDeclaredPayload | null {
+  if (!pre.startTime || !pre.winnerId) return null
+  const winnerCrossMs = pre.finishTimesMs[pre.winnerId]
+  if (!Number.isFinite(winnerCrossMs)) return null
+  const timestampMs = pre.startTime.getTime() + winnerCrossMs
+
+  return {
+    raceId: pre.id,
+    timestampUtc: new Date(timestampMs).toISOString(),
+    winnerId: pre.winnerId,
+    finishOrder: [...pre.finishOrder],
+    finishTimesMs: { ...pre.finishTimesMs },
+    finishTickIndex: { ...pre.finishTickIndex },
+    presentation: {
+      bannerVisibleUntilUtc: new Date(
+        timestampMs + FINISH_FLASH_MS + WINNER_BANNER_HOLD_MS,
+      ).toISOString(),
+      resultsVisibleUntilUtc: deriveResultsVisibleUntilUtc(
+        new Date(timestampMs).toISOString(),
+      ),
+    },
+  }
+}
+
+function winnerResultFromFinishPayload(
+  pre: PrecomputedRace,
+  finish: RaceFinishPayload,
+): WinnerResult {
+  const timestampMs = finish.finishTimesMs[finish.winnerId] ?? 0
+  return Object.freeze({
+    horseId: finish.winnerId,
+    tickIndex:
+      finish.finishTickIndex[finish.winnerId] ??
+      Math.floor(timestampMs / pre.config.dtMs),
+    timestampMs,
+  })
+}
+
+type SeededRaceBuild = {
+  precomputed: PrecomputedRace
+  eventsCount: number
+  crossingsCount: number
+}
+
+function announceWinnerDeclaredIfNeeded(currentTickIndex: number): void {
+  if (!precomputed?.startTime || !currentRace?.isActive) return
+
+  const winnerTickIndex = precomputed.finishTickIndex[precomputed.winnerId]
+  if (!Number.isFinite(winnerTickIndex) || currentTickIndex < winnerTickIndex) {
+    return
+  }
+
+  const rec = activeRaces.get(precomputed.id)
+  if (rec?.winnerDeclaredSent) return
+
+  const payload = buildWinnerDeclaredPayload(precomputed)
+  if (!payload) return
+
+  if (rec) {
+    rec.winnerDeclaredSent = true
+    activeRaces.set(precomputed.id, rec)
+  }
+
+  RaceWebSocketServer.broadcast({
+    type: 'race:winner-declared',
+    ...payload,
+  })
+}
+
 function persistCompletedRace(pre: PrecomputedRace): void {
   try {
     if (!pre.finalHorseStateMatrix || !pre.eventTimeline) {
       persistence.markUnsaved(pre.id)
+      void raceRepository
+        .markRaceFinished({
+          raceId: pre.id,
+          actualEndTime: pre.endTime ?? null,
+          checksum: pre.checksum ?? null,
+          winnerId: pre.winnerId,
+          finishOrder: [...pre.finishOrder],
+          finishTimesMs: { ...pre.finishTimesMs },
+          config: pre.config as unknown as Record<string, unknown>,
+          hasTickStream: false,
+          hasPrecomputedPaths: false,
+          eventsCount: 0,
+          persistenceStatus: 'unsaved',
+          lifecycleStatus: 'results_showing',
+        })
+        .catch(() => {})
       return
     }
-    const winner: WinnerResult | null = determineWinner(
-      pre.finalHorseStateMatrix,
-      pre.finishLine,
-      pre.config.dtMs,
-    )
+    const authoritativeFinish =
+      pre.authoritativeFinish ??
+      buildAuthoritativeFinishPayload(pre, pre.endTime ?? new Date())
+    pre.authoritativeFinish = authoritativeFinish
+    const winner: WinnerResult =
+      determineWinner(
+        pre.finalHorseStateMatrix,
+        pre.finishLine,
+        pre.config.dtMs,
+      ) ?? winnerResultFromFinishPayload(pre, authoritativeFinish)
     const outcome = Object.freeze({
       winnerId: pre.winnerId,
       finishOrder: pre.finishOrder,
@@ -70,21 +218,66 @@ function persistCompletedRace(pre: PrecomputedRace): void {
     const data = {
       raceId: pre.id,
       seed: pre.config.seed,
+      authoritativeFinish,
       precomputedPaths: pre.finalHorseStateMatrix,
       eventTimeline: pre.eventTimeline,
       outcome,
-      winner: winner!,
+      winner,
       config: pre.config,
       checksum: pre.checksum,
     }
-    persistence
+    void persistence
       .saveRace(pre.id, data as any)
-      .catch((e) => log(`[${ts()}][PERSIST][${pre.id}] ${e?.message || e}`))
+      .then(async (result) => {
+        await raceRepository.markRaceFinished({
+          raceId: pre.id,
+          actualEndTime: pre.endTime ?? null,
+          checksum: pre.checksum ?? null,
+          winnerId: pre.winnerId,
+          finishOrder: [...pre.finishOrder],
+          finishTimesMs: { ...pre.finishTimesMs },
+          config: pre.config as unknown as Record<string, unknown>,
+          hasTickStream: result.hasTickStream,
+          hasPrecomputedPaths: result.hasPrecomputedPaths,
+          eventsCount: result.eventsCount,
+          persistenceStatus: result.persistenceStatus,
+          lifecycleStatus: 'results_showing',
+        })
+        await raceArtifactRepository.upsertArtifacts(
+          result.artifacts.map((artifact) => ({
+            raceId: pre.id,
+            artifactType: artifact.artifactType,
+            storageProvider: artifact.storageProvider,
+            storageKey: artifact.storageKey,
+            contentType: artifact.contentType,
+            byteSize: artifact.byteSize ?? null,
+            checksum: artifact.checksum ?? null,
+          })),
+        )
+      })
+      .catch(async (e) => {
+        log(`[${ts()}][PERSIST][${pre.id}] ${e?.message || e}`)
+        await raceRepository.markRaceFinished({
+          raceId: pre.id,
+          actualEndTime: pre.endTime ?? null,
+          checksum: pre.checksum ?? null,
+          winnerId: pre.winnerId,
+          finishOrder: [...pre.finishOrder],
+          finishTimesMs: { ...pre.finishTimesMs },
+          config: pre.config as unknown as Record<string, unknown>,
+          hasTickStream: false,
+          hasPrecomputedPaths: false,
+          eventsCount: 0,
+          persistenceStatus: 'unsaved',
+          lifecycleStatus: 'results_showing',
+        })
+      })
   } catch (e: any) {
     log(`[${ts()}][PERSIST][${pre.id}] compose-error ${e?.message || e}`)
     try {
       persistence.markUnsaved(pre.id)
     } catch {}
+    void raceRepository.markPersistenceStatus(pre.id, 'unsaved').catch(() => {})
   }
 }
 
@@ -309,11 +502,11 @@ export function generateRaceTicks(
     )} last3=${JSON.stringify(sampleLast)}`,
   )
   log(
-    `[${ts()}][RACE][${raceId}] Projected finish times (ms): ${JSON.stringify(
+    `[${ts()}][RACE][${raceId}] Base finish times (ms): ${JSON.stringify(
       finishTimesMs,
     )}`,
   )
-  log(`[${ts()}][RACE][${raceId}] Precompute complete. Winner=${winnerId}`)
+  log(`[${ts()}][RACE][${raceId}] Base pre-event winner=${winnerId}`)
 
   return { ticks, finishOrder, finishTimesMs, winnerId, finishTickIndex }
 }
@@ -323,12 +516,99 @@ export function generateRaceTicks(
  * Uses the single RNG created from the current seed stored in RaceState.
  */
 export function seedPrecomputedRace(): PrecomputedRace {
-  const seedStr = RaceState.getCurrentSeed()
-  const seedInt = RaceState.getCurrentSeedInt()
-  if (!seedStr || seedInt == null) {
+  const baseSeedStr = RaceState.getCurrentSeed()
+  if (!baseSeedStr) {
     throw new Error('Active cycle seed not set')
   }
-  // Deterministic raceId derived from seed
+
+  let seededRace: SeededRaceBuild | null = null
+  let selectedSeedStr = baseSeedStr
+
+  for (let attempt = 0; attempt < MAX_SEED_RETRY_ATTEMPTS; attempt++) {
+    const candidateSeed =
+      attempt === 0 ? baseSeedStr : `${baseSeedStr}:finish-retry-${attempt}`
+    const candidateSeedInt = hashStringToInt(candidateSeed)
+    const candidate = buildSeededRace(candidateSeed, candidateSeedInt)
+    if (candidate.crossingsCount > 0) {
+      seededRace = candidate
+      selectedSeedStr = candidateSeed
+      break
+    }
+
+    log(
+      `[${ts()}][RACE][retry] Seed ${candidateSeed} produced no canonical crossings; retrying`,
+    )
+  }
+
+  if (!seededRace) {
+    throw new Error('Unable to seed a race with a canonical finish crossing')
+  }
+
+  if (selectedSeedStr !== baseSeedStr) {
+    RaceState.setCurrentSeed(selectedSeedStr)
+  }
+
+  precomputed = seededRace.precomputed
+  const raceId = precomputed.id
+  lastStreamedIndex = null
+
+  try {
+    const catchupTicks = (precomputed.finalHorseStateMatrix ?? []).map(
+      (states, i) => ({
+        tickIndex: i,
+        positions: states.map((s) => s.position),
+        events: Array.from(buildLiveRaceEvents(precomputed!, i)),
+        effects: Array.from(buildLiveHorseEffects(precomputed!, i)),
+      }),
+    )
+    activeRaces.set(raceId, {
+      ticks: catchupTicks,
+      startTime: 0,
+      currentTickIndex: -1,
+      winnerDeclaredSent: false,
+    })
+  } catch {
+    // no-op (non-fatal; additive only)
+  }
+
+  log(`[${ts()}][RACE][${raceId}] Seeded race`, {
+    raceId,
+    trackLength: precomputed.config.trackLength,
+    finishLine: precomputed.finishLine,
+    durationMs: precomputed.config.durationMs,
+    dtMs: precomputed.config.dtMs,
+    winnerId: precomputed.winnerId,
+    seed: precomputed.config.seed,
+  })
+
+  void raceRepository
+    .upsertSeededRace({
+      raceId,
+      seed: selectedSeedStr,
+      checksum: precomputed.checksum ?? null,
+      config: precomputed.config as unknown as Record<string, unknown>,
+      eventsCount: seededRace.eventsCount,
+    })
+    .catch((e) =>
+      log(`[${ts()}][DB][${raceId}] seed-upsert-error ${e?.message || e}`),
+    )
+
+  try {
+    RaceWebSocketServer.broadcast({
+      type: 'race:info',
+      raceId: precomputed!.id,
+      horseOrder: precomputed!.horses.map((h) => h.id),
+      config: precomputed!.config,
+      currentTickIndex: -1,
+    })
+  } catch {
+    // non-fatal: clients will receive race:info on next reconnect
+  }
+
+  return precomputed
+}
+
+function buildSeededRace(seedStr: string, seedInt: number): SeededRaceBuild {
   const raceId = `race-${seedInt.toString(16).padStart(8, '0')}`
 
   const config: RaceConfig = {
@@ -390,21 +670,22 @@ export function seedPrecomputedRace(): PrecomputedRace {
     ticks,
   })
 
-  // Winner from canonical matrix (keeps acceptance criteria aligned)
-  const winnerFromMatrix =
-    determineWinner(finalHorseStateMatrix, finishLine, config.dtMs)?.horseId ||
-    winnerId
-
   // Crossing times derived from canonical matrix
   const crossings = computeCrossingsFromMatrix(
     finalHorseStateMatrix,
     finishLine,
     config.dtMs,
   )
+  const canonicalFinishOrder = deriveCanonicalFinishOrderFromArtifacts(
+    horses.map((horse) => horse.id),
+    crossings.timesMs,
+    finalHorseStateMatrix,
+  )
+  const winnerFromMatrix = canonicalFinishOrder[0] ?? winnerId
 
   // Deep-freeze stable outputs
   const frozenTicks = deepFreezeTicks(ticks)
-  const frozenFinishOrder = Object.freeze(finishOrder)
+  const frozenFinishOrder = Object.freeze(canonicalFinishOrder)
   const frozenFinishTimes = Object.freeze({ ...crossings.timesMs })
   const tFreezeStart = performance.now()
   const frozenTimeline = freezeEventTimeline(eventTimeline)
@@ -413,7 +694,7 @@ export function seedPrecomputedRace(): PrecomputedRace {
     performance.now() - tFreezeStart,
   )
 
-  precomputed = {
+  const nextPrecomputed: PrecomputedRace = {
     id: raceId,
     config,
     horses,
@@ -432,54 +713,21 @@ export function seedPrecomputedRace(): PrecomputedRace {
 
   // Compute checksum and attach
   try {
-    const checksum = computeRaceChecksum(precomputed!)
-    precomputed!.checksum = checksum
+    const checksum = computeRaceChecksum(nextPrecomputed)
+    nextPrecomputed.checksum = checksum
     log(`[${ts()}][RACE][${raceId}] checksum=${checksum}`)
   } catch {
     // non-fatal
   }
 
-  lastStreamedIndex = null
-
-  // Late-joiner: snapshot compact ticks for catch-up without touching engines or schedulers
-  try {
-    const catchupTicks = finalHorseStateMatrix.map((states, i) => ({
-      tickIndex: i,
-      positions: states.map((s) => s.position),
-    }))
-    activeRaces.set(raceId, {
-      ticks: catchupTicks,
-      startTime: 0,
-      currentTickIndex: -1,
-    })
-  } catch {
-    // no-op (non-fatal; additive only)
+  return {
+    precomputed: nextPrecomputed,
+    eventsCount: Array.from(frozenTimeline.values()).reduce(
+      (count, events) => count + events.length,
+      0,
+    ),
+    crossingsCount: Object.keys(crossings.timesMs).length,
   }
-
-  log(`[${ts()}][RACE][${raceId}] Seeded race`, {
-    raceId,
-    trackLength: config.trackLength,
-    finishLine,
-    durationMs: config.durationMs,
-    dtMs: config.dtMs,
-    winnerId,
-  })
-
-  // Notify all connected clients about the new race so they update without
-  // needing to reconnect. Safe to call with zero clients.
-  try {
-    RaceWebSocketServer.broadcast({
-      type: 'race:info',
-      raceId: precomputed!.id,
-      horseOrder: precomputed!.horses.map((h) => h.id),
-      config: precomputed!.config,
-      currentTickIndex: -1,
-    })
-  } catch {
-    // non-fatal: clients will receive race:info on next reconnect
-  }
-
-  return precomputed!
 }
 
 /**
@@ -545,11 +793,19 @@ export function startPrecomputedRace(startTime = new Date()): PrecomputedRace {
     if (rec) {
       rec.startTime = startTime.getTime()
       rec.currentTickIndex = -1
+      rec.winnerDeclaredSent = false
       activeRaces.set(precomputed.id, rec)
     }
   } catch {
     // non-fatal
   }
+  void raceRepository
+    .markRaceStarted(precomputed.id, startTime)
+    .catch((e) =>
+      log(
+        `[${ts()}][DB][${precomputed?.id}] start-update-error ${e?.message || e}`,
+      ),
+    )
   return precomputed
 }
 
@@ -558,6 +814,8 @@ function broadcastTickSafe(
   runtimeRace: Race,
   tickIndex: number,
   updates: ReadonlyArray<{ horseId: string; position: number }>,
+  events: ReadonlyArray<LiveRaceEvent>,
+  effects: ReadonlyArray<LiveHorseEffect>,
 ) {
   if (tickIndex <= runtimeRace.lastBroadcastedTick) {
     log(
@@ -601,9 +859,56 @@ function broadcastTickSafe(
       raceId: runtimeRace.id,
       tickIndex,
       positions: _posBuffer,
+      events,
+      effects,
     },
   })
   runtimeRace.lastBroadcastedTick = tickIndex
+}
+
+function buildLiveHorseEffects(
+  pre: PrecomputedRace,
+  tickIndex: number,
+): ReadonlyArray<LiveHorseEffect> {
+  const states = pre.finalHorseStateMatrix?.[tickIndex] ?? []
+  return states
+    .filter(
+      (state) =>
+        state.activeEvents.length > 0 || state.isStunned || state.isRemoved,
+    )
+    .map((state) => ({
+      horseId: state.horseId,
+      activeEventIds: [...state.activeEvents],
+      isStunned: state.isStunned,
+      isRemoved: state.isRemoved,
+    }))
+}
+
+function eventTouchesHorse(
+  eventId: string,
+  activeEventIds: ReadonlyArray<string>,
+): boolean {
+  if (activeEventIds.includes(eventId)) return true
+  if (eventId === 'chain_reaction' && activeEventIds.includes('chain_stun')) {
+    return true
+  }
+  return false
+}
+
+function buildLiveRaceEvents(
+  pre: PrecomputedRace,
+  tickIndex: number,
+): ReadonlyArray<LiveRaceEvent> {
+  const events = pre.eventTimeline?.get(tickIndex) ?? []
+  const states = pre.finalHorseStateMatrix?.[tickIndex] ?? []
+  return events.map((event) => ({
+    id: event.id,
+    instanceId: event.instanceId,
+    tickIndex,
+    affectedHorseIds: states
+      .filter((state) => eventTouchesHorse(event.id, state.activeEvents))
+      .map((state) => state.horseId),
+  }))
 }
 
 /**
@@ -611,17 +916,26 @@ function broadcastTickSafe(
  * the declared result matches what clients visually observed on screen.
  */
 function deriveCanonicalFinishOrder(pre: PrecomputedRace): string[] {
-  const allIds = pre.horses.map((h) => h.id)
-  const timesMs = pre.finishTimesMs as Record<string, number>
-  // Final positions from canonical matrix for tie-breaking non-finishers
-  const lastTick =
-    pre.finalHorseStateMatrix?.[(pre.finalHorseStateMatrix?.length ?? 1) - 1]
-  const posMap = new Map<string, number>(
-    (lastTick ?? []).map((s) => [s.horseId, s.position]),
+  return deriveCanonicalFinishOrderFromArtifacts(
+    pre.horses.map((h) => h.id),
+    pre.finishTimesMs as Record<string, number>,
+    pre.finalHorseStateMatrix,
   )
-  return [...allIds].sort((a, b) => {
-    const ta = timesMs[a] ?? Infinity
-    const tb = timesMs[b] ?? Infinity
+}
+
+function deriveCanonicalFinishOrderFromArtifacts(
+  horseIds: ReadonlyArray<string>,
+  finishTimesMs: Readonly<Record<string, number>>,
+  finalHorseStateMatrix?: FinalHorseStateMatrix,
+): string[] {
+  const lastTick = finalHorseStateMatrix?.[finalHorseStateMatrix.length - 1]
+  const posMap = new Map<string, number>(
+    (lastTick ?? []).map((state) => [state.horseId, state.position]),
+  )
+
+  return [...horseIds].sort((a, b) => {
+    const ta = finishTimesMs[a] ?? Infinity
+    const tb = finishTimesMs[b] ?? Infinity
     if (ta !== tb) return ta - tb
     return (posMap.get(b) ?? 0) - (posMap.get(a) ?? 0)
   })
@@ -675,6 +989,8 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
     horseId: s.horseId,
     position: s.position,
   }))
+  const events = buildLiveRaceEvents(precomputed, idx)
+  const effects = buildLiveHorseEffects(precomputed, idx)
 
   log(
     `[${ts()}][TICK][${
@@ -684,8 +1000,14 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
 
   // Sequential guard broadcast
   if (currentRace) {
-    broadcastTickSafe(currentRace, idx, updates)
+    broadcastTickSafe(currentRace, idx, updates, events, effects)
   }
+  const rec = activeRaces.get(precomputed.id)
+  if (rec) {
+    rec.currentTickIndex = idx
+    activeRaces.set(precomputed.id, rec)
+  }
+  announceWinnerDeclaredIfNeeded(idx)
   consecutiveTickFailures = 0
 
   const raceDurationOver = elapsedMs >= precomputed.config.durationMs
@@ -713,6 +1035,10 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
       currentRace.horses.find((h) => h.id === precomputed!.winnerId) ??
       currentRace.placements[0]
     precomputed.endTime = now
+    precomputed.authoritativeFinish = buildAuthoritativeFinishPayload(
+      precomputed,
+      now,
+    )
 
     log(
       `[${ts()}][RACE][${precomputed.id}] Race finished. Winner=${currentRace.winner!.id}`,
@@ -723,10 +1049,7 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
 
     RaceWebSocketServer.broadcast({
       type: 'race:finish',
-      timestampUtc: now.toISOString(),
-      raceId: precomputed.id,
-      winnerId: currentRace.winner!.id,
-      finishOrder: currentRace.placements.map((h) => h.id),
+      ...precomputed.authoritativeFinish,
     })
   }
 
@@ -945,9 +1268,12 @@ export function streamPrecomputedTickAt(tickIndex: number): PositionUpdate[] {
   // Pass states directly — avoids allocating a PositionUpdate[] wrapper array
   // (10 objects + 1 array) on every tick.
   const states = precomputed.finalHorseStateMatrix?.[idx] ?? []
+  const events = buildLiveRaceEvents(precomputed, idx)
+  const effects = buildLiveHorseEffects(precomputed, idx)
 
   // Sequential guard broadcast
-  broadcastTickSafe(currentRace, idx, states)
+  broadcastTickSafe(currentRace, idx, states, events, effects)
+  announceWinnerDeclaredIfNeeded(idx)
 
   // Update authoritative current tick for catch-up consumers
   const rec = activeRaces.get(precomputed.id)
@@ -978,16 +1304,17 @@ export function streamPrecomputedTickAt(tickIndex: number): PositionUpdate[] {
         precomputed.startTime.getTime() + endOffset,
       )
     }
+    precomputed.authoritativeFinish = buildAuthoritativeFinishPayload(
+      precomputed,
+      precomputed.endTime ?? new Date(),
+    )
 
     // Persist canonical artifacts
     persistCompletedRace(precomputed)
 
     RaceWebSocketServer.broadcast({
       type: 'race:finish',
-      timestampUtc: (precomputed.endTime ?? new Date()).toISOString(),
-      raceId: precomputed.id,
-      winnerId: currentRace.winner!.id,
-      finishOrder: currentRace.placements.map((h) => h.id),
+      ...precomputed.authoritativeFinish,
     })
 
     // Clear the live runtime race. Archiving is deferred to releaseRace() at the

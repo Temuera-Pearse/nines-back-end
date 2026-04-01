@@ -5,6 +5,7 @@ type RollingStats = Readonly<{
   count: number
   avg: number
   max: number
+  p95: number
 }>
 
 type MetricsSnapshot = Readonly<{
@@ -20,6 +21,25 @@ type MetricsSnapshot = Readonly<{
     droppedTickFrames: number
     avgBufferedAmount: number
     latestSeqByRace: Readonly<Record<string, number>>
+    sync: Readonly<{
+      requests: number
+      rateLimited: number
+      errors: number
+      catchupTicksServed: number
+      catchupServiceMs: RollingStats
+    }>
+    broadcast: Readonly<{
+      fanoutMs: RollingStats
+    }>
+    bus: Readonly<{
+      publishSuccess: number
+      publishErrors: number
+      publishLatencyMs: RollingStats
+    }>
+    edge: Readonly<{
+      rebroadcasts: number
+      inputLagMs: RollingStats
+    }>
   }>
   gc: Readonly<{
     minorCount: number
@@ -50,18 +70,26 @@ class Ring {
     if (this.filled < this.capacity) this.filled++
   }
   stats(): RollingStats {
-    if (this.filled === 0) return { count: 0, avg: 0, max: 0 }
+    if (this.filled === 0) return { count: 0, avg: 0, max: 0, p95: 0 }
     let sum = 0
     let max = -Infinity
+    const values: number[] = []
     for (let k = 0; k < this.filled; k++) {
       const v = this.buf[k]
       sum += v
       if (v > max) max = v
+      values.push(v)
     }
+    values.sort((a, b) => a - b)
+    const p95Index = Math.min(
+      values.length - 1,
+      Math.max(0, Math.ceil(values.length * 0.95) - 1),
+    )
     return {
       count: this.filled,
       avg: sum / this.filled,
       max: max === -Infinity ? 0 : max,
+      p95: values[p95Index] ?? 0,
     }
   }
   clear(): void {
@@ -106,6 +134,17 @@ export class EngineMetrics {
   private wsDroppedTickFrames = 0
   private wsBufferedRing = new Ring(200)
   private latestSeqByRace = new Map<string, number>()
+  private wsSyncRequests = 0
+  private wsSyncRateLimited = 0
+  private wsSyncErrors = 0
+  private wsCatchupTicksServed = 0
+  private wsCatchupServiceMs = new Ring(200)
+  private wsFanoutMs = new Ring(200)
+  private wsBusPublishSuccess = 0
+  private wsBusPublishErrors = 0
+  private wsBusPublishMs = new Ring(200)
+  private wsEdgeRebroadcasts = 0
+  private wsEdgeInputLagMs = new Ring(200)
 
   constructor() {
     // Optional GC observer (negligible overhead)
@@ -215,6 +254,25 @@ export class EngineMetrics {
         latestSeqByRace: Object.freeze(
           Object.fromEntries(this.latestSeqByRace.entries()),
         ),
+        sync: Object.freeze({
+          requests: this.wsSyncRequests,
+          rateLimited: this.wsSyncRateLimited,
+          errors: this.wsSyncErrors,
+          catchupTicksServed: this.wsCatchupTicksServed,
+          catchupServiceMs: this.wsCatchupServiceMs.stats(),
+        }),
+        broadcast: Object.freeze({
+          fanoutMs: this.wsFanoutMs.stats(),
+        }),
+        bus: Object.freeze({
+          publishSuccess: this.wsBusPublishSuccess,
+          publishErrors: this.wsBusPublishErrors,
+          publishLatencyMs: this.wsBusPublishMs.stats(),
+        }),
+        edge: Object.freeze({
+          rebroadcasts: this.wsEdgeRebroadcasts,
+          inputLagMs: this.wsEdgeInputLagMs.stats(),
+        }),
       }),
       gc: Object.freeze({
         minorCount: this.gcMinor,
@@ -248,6 +306,17 @@ export class EngineMetrics {
     this.preSumMs = 0
     this.preCount = 0
     this.prePhasesLast = Object.create(null)
+    this.wsSyncRequests = 0
+    this.wsSyncRateLimited = 0
+    this.wsSyncErrors = 0
+    this.wsCatchupTicksServed = 0
+    this.wsCatchupServiceMs.clear()
+    this.wsFanoutMs.clear()
+    this.wsBusPublishSuccess = 0
+    this.wsBusPublishErrors = 0
+    this.wsBusPublishMs.clear()
+    this.wsEdgeRebroadcasts = 0
+    this.wsEdgeInputLagMs.clear()
     this.events.emit('metrics:reset')
   }
 
@@ -261,6 +330,43 @@ export class EngineMetrics {
   recordBufferedAmount(bytes: number): void {
     this.wsBufferedRing.push(bytes)
   }
+
+  recordSyncRequest(): void {
+    this.wsSyncRequests++
+  }
+
+  recordSyncRateLimited(): void {
+    this.wsSyncRateLimited++
+  }
+
+  recordSyncError(): void {
+    this.wsSyncErrors++
+  }
+
+  recordCatchupWindow(ticksServed: number, durationMs: number): void {
+    this.wsCatchupTicksServed += ticksServed
+    this.wsCatchupServiceMs.push(durationMs)
+  }
+
+  recordFanout(durationMs: number): void {
+    this.wsFanoutMs.push(durationMs)
+  }
+
+  recordBusPublish(durationMs: number): void {
+    this.wsBusPublishSuccess++
+    this.wsBusPublishMs.push(durationMs)
+  }
+
+  recordBusPublishError(durationMs: number): void {
+    this.wsBusPublishErrors++
+    this.wsBusPublishMs.push(durationMs)
+  }
+
+  recordEdgeRebroadcast(inputLagMs: number): void {
+    this.wsEdgeRebroadcasts++
+    this.wsEdgeInputLagMs.push(inputLagMs)
+  }
+
   setLatestSeq(raceId: string, seq: number): void {
     this.latestSeqByRace.set(raceId, seq)
   }

@@ -3,6 +3,7 @@ type RollingStats = Readonly<{
     count: number;
     avg: number;
     max: number;
+    p95: number;
 }>;
 type MetricsSnapshot = Readonly<{
     startedAt: number | null;
@@ -17,6 +18,25 @@ type MetricsSnapshot = Readonly<{
         droppedTickFrames: number;
         avgBufferedAmount: number;
         latestSeqByRace: Readonly<Record<string, number>>;
+        sync: Readonly<{
+            requests: number;
+            rateLimited: number;
+            errors: number;
+            catchupTicksServed: number;
+            catchupServiceMs: RollingStats;
+        }>;
+        broadcast: Readonly<{
+            fanoutMs: RollingStats;
+        }>;
+        bus: Readonly<{
+            publishSuccess: number;
+            publishErrors: number;
+            publishLatencyMs: RollingStats;
+        }>;
+        edge: Readonly<{
+            rebroadcasts: number;
+            inputLagMs: RollingStats;
+        }>;
     }>;
     gc: Readonly<{
         minorCount: number;
@@ -59,6 +79,17 @@ export declare class EngineMetrics {
     private wsDroppedTickFrames;
     private wsBufferedRing;
     private latestSeqByRace;
+    private wsSyncRequests;
+    private wsSyncRateLimited;
+    private wsSyncErrors;
+    private wsCatchupTicksServed;
+    private wsCatchupServiceMs;
+    private wsFanoutMs;
+    private wsBusPublishSuccess;
+    private wsBusPublishErrors;
+    private wsBusPublishMs;
+    private wsEdgeRebroadcasts;
+    private wsEdgeInputLagMs;
     constructor();
     startRace(tickIntervalMs: number): void;
     stopRace(): void;
@@ -71,6 +102,14 @@ export declare class EngineMetrics {
     setClientCount(n: number): void;
     incDroppedTickFrames(n?: number): void;
     recordBufferedAmount(bytes: number): void;
+    recordSyncRequest(): void;
+    recordSyncRateLimited(): void;
+    recordSyncError(): void;
+    recordCatchupWindow(ticksServed: number, durationMs: number): void;
+    recordFanout(durationMs: number): void;
+    recordBusPublish(durationMs: number): void;
+    recordBusPublishError(durationMs: number): void;
+    recordEdgeRebroadcast(inputLagMs: number): void;
     setLatestSeq(raceId: string, seq: number): void;
 }
 export declare const engineMetrics: EngineMetrics;
