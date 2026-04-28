@@ -61,6 +61,7 @@ describeIfDatabase('bet settlement integration', () => {
   })
 
   beforeEach(async () => {
+    process.env.NINES_ENABLE_LEGACY_ALPHA_FINANCIAL_FALLBACK = 'true'
     const pool = getPool()
     await pool.query(
       'truncate table bets, wallet_ledger_entries, wallets, users, race_artifacts, races restart identity cascade',
@@ -70,12 +71,13 @@ describeIfDatabase('bet settlement integration', () => {
   })
 
   afterAll(async () => {
+    delete process.env.NINES_ENABLE_LEGACY_ALPHA_FINANCIAL_FALLBACK
     RaceState.setPrecomputedRace(null)
     RaceState.setCurrentRace(null)
     await closePool()
   })
 
-  it('settles winning and losing bets idempotently', async () => {
+  it('keeps the explicit legacy alpha fallback for wallet settlement credits', async () => {
     const raceId = 'race-finished-1'
     RaceState.setPrecomputedRace(makeOpenRace(raceId))
 
@@ -90,18 +92,18 @@ describeIfDatabase('bet settlement integration', () => {
     const winner = await userService.createUser({
       username: 'winner-bettor',
       dateOfBirth: '2000-01-01',
-      currency: 'USD',
+      currency: 'USDC',
     })
     const loser = await userService.createUser({
       username: 'loser-bettor',
       dateOfBirth: '2000-01-01',
-      currency: 'USD',
+      currency: 'USDC',
     })
 
     await walletService.creditWallet({
       userId: winner.user.id,
       amountMinor: 5000n,
-      currency: 'USD',
+      currency: 'USDC',
       entryType: 'admin_credit',
       referenceType: 'admin',
       referenceId: 'seed-winner',
@@ -109,7 +111,7 @@ describeIfDatabase('bet settlement integration', () => {
     await walletService.creditWallet({
       userId: loser.user.id,
       amountMinor: 5000n,
-      currency: 'USD',
+      currency: 'USDC',
       entryType: 'admin_credit',
       referenceType: 'admin',
       referenceId: 'seed-loser',
@@ -120,14 +122,14 @@ describeIfDatabase('bet settlement integration', () => {
       raceId,
       selectionId: 'horse-3',
       stakeMinor: 1200n,
-      currency: 'USD',
+      currency: 'USDC',
     })
     await betService.placeBet({
       userId: loser.user.id,
       raceId,
       selectionId: 'horse-1',
       stakeMinor: 1200n,
-      currency: 'USD',
+      currency: 'USDC',
     })
 
     await raceRepository.markRaceFinished({
@@ -156,8 +158,8 @@ describeIfDatabase('bet settlement integration', () => {
         ?.entryType,
     ).toBe('settlement_credit')
 
-    const winnerWallet = await walletService.getWalletByUserId(winner.user.id, 'USD')
-    const loserWallet = await walletService.getWalletByUserId(loser.user.id, 'USD')
+    const winnerWallet = await walletService.getWalletByUserId(winner.user.id, 'USDC')
+    const loserWallet = await walletService.getWalletByUserId(loser.user.id, 'USDC')
 
     expect(winnerWallet.balanceMinor).toBe(6200n)
     expect(loserWallet.balanceMinor).toBe(3800n)
@@ -183,7 +185,7 @@ describeIfDatabase('bet settlement integration', () => {
 
     const winnerWalletAfterRerun = await walletService.getWalletByUserId(
       winner.user.id,
-      'USD',
+      'USDC',
     )
     expect(winnerWalletAfterRerun.balanceMinor).toBe(6200n)
   })

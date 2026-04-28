@@ -3,6 +3,11 @@ import { getPool } from '../db/pool.js'
 import { getWalletLedgerRepository } from '../db/walletLedgerRepository.js'
 import { getWalletRepository } from '../db/walletRepository.js'
 import { NotFoundError, ValidationError } from '../user/errors.js'
+import {
+  assertLegacyAlphaFinancialMutationPath,
+  LEGACY_ALPHA_FINANCIAL_AUTHORITY_WARNING,
+  normalizeFinancialCurrency,
+} from '../financial/legacyAlphaFinancialAuthority.js'
 import type {
   WalletAdjustmentInput,
   WalletLedgerEntryRecord,
@@ -22,7 +27,7 @@ export interface WalletService {
 }
 
 function normalizeCurrency(currency?: string): string {
-  return (currency || 'USD').trim().toUpperCase()
+  return normalizeFinancialCurrency(currency)
 }
 
 function ensurePositiveAmount(amountMinor: bigint): void {
@@ -38,6 +43,11 @@ export async function applyWalletDeltaInTransaction(
   wallet: WalletRecord
   ledgerEntry: WalletLedgerEntryRecord
 }> {
+  assertLegacyAlphaFinancialMutationPath('applyWalletDeltaInTransaction')
+  // TODO(phase-2.5): Replace this alpha wallet mutation with a nines-financial
+  // command client. This path is not financial truth.
+  void LEGACY_ALPHA_FINANCIAL_AUTHORITY_WARNING
+
   const walletRepository = getWalletRepository()
   const walletLedgerRepository = getWalletLedgerRepository()
   const currency = normalizeCurrency(input.currency)
@@ -116,6 +126,9 @@ export class DefaultWalletService implements WalletService {
     wallet: WalletRecord
     ledgerEntry: WalletLedgerEntryRecord
   }> {
+    assertLegacyAlphaFinancialMutationPath('DefaultWalletService.applyDelta')
+    // TODO(phase-2.5): Keep only for alpha demos until nines-back-end calls
+    // nines-financial for funding, debits, reservations, and balances.
     const pool = getPool()
     const client = await pool.connect()
 

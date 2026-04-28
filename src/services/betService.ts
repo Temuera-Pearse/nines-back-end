@@ -1,8 +1,18 @@
 import { randomUUID } from 'crypto'
+import type { Pool } from 'pg'
 import { getPool } from '../db/pool.js'
-import { getBetRepository } from '../db/betRepository.js'
-import { getRaceRepository } from '../db/raceRepository.js'
-import { getWalletRepository } from '../db/walletRepository.js'
+import {
+  getBetRepository,
+  type BetRepository,
+} from '../db/betRepository.js'
+import {
+  getRaceRepository,
+  type RaceRepository,
+} from '../db/raceRepository.js'
+import {
+  getWalletRepository,
+  type WalletRepository,
+} from '../db/walletRepository.js'
 import { RaceState } from '../race/raceState.js'
 import {
   ForbiddenError,
@@ -11,13 +21,27 @@ import {
 } from '../user/errors.js'
 import type { WalletLedgerEntryRecord, WalletRecord } from '../user/types.js'
 import type { BetRecord, PlaceBetInput } from '../bet/types.js'
-import { getUserService } from './userService.js'
+import {
+  assertLegacyAlphaFinancialMutationPath,
+  CANONICAL_FRONT_OF_HOUSE_CURRENCY,
+  isLegacyAlphaFinancialFallbackEnabled,
+  LEGACY_ALPHA_FINANCIAL_AUTHORITY_WARNING,
+  normalizeFinancialCurrency,
+} from '../financial/legacyAlphaFinancialAuthority.js'
+import {
+  getNinesFinancialClient,
+  type FinancialCurrency,
+  type NinesFinancialClient,
+  type ReserveStakeResult,
+} from '../financial/ninesFinancialClient.js'
+import { getUserService, type UserService } from './userService.js'
 import { applyWalletDeltaInTransaction } from './walletService.js'
 
 export interface PlaceBetResult {
   bet: BetRecord
   wallet: WalletRecord
-  ledgerEntry: WalletLedgerEntryRecord
+  ledgerEntry: WalletLedgerEntryRecord | null
+  financialReservation: ReserveStakeResult | null
 }
 
 export interface BetService {
@@ -27,7 +51,15 @@ export interface BetService {
 }
 
 function normalizeCurrency(currency?: string): string {
-  return (currency || 'USD').trim().toUpperCase()
+  return normalizeFinancialCurrency(currency)
+}
+
+function requireCanonicalFinancialCurrency(currency: string): FinancialCurrency {
+  if (currency !== CANONICAL_FRONT_OF_HOUSE_CURRENCY) {
+    throw new ValidationError('currency must be USDC for financial authority flows')
+  }
+
+  return CANONICAL_FRONT_OF_HOUSE_CURRENCY
 }
 
 function ensurePositiveStake(stakeMinor: bigint): void {
@@ -61,11 +93,41 @@ function assertRaceOpenAndSelectionValid(
   }
 }
 
+export interface BetServiceDependencies {
+  betRepository?: BetRepository
+  walletRepository?: WalletRepository
+  raceRepository?: RaceRepository
+  userService?: UserService
+  financialClient?: NinesFinancialClient
+  poolFactory?: () => Pool
+  legacyAlphaFallbackEnabled?: () => boolean
+  applyWalletDelta?: typeof applyWalletDeltaInTransaction
+}
+
 export class DefaultBetService implements BetService {
-  private betRepository = getBetRepository()
-  private walletRepository = getWalletRepository()
-  private raceRepository = getRaceRepository()
-  private userService = getUserService()
+  private readonly betRepository: BetRepository
+  private readonly walletRepository: WalletRepository
+  private readonly raceRepository: RaceRepository
+  private readonly userService: UserService
+  private readonly financialClient: NinesFinancialClient
+  private readonly poolFactory: () => Pool
+  private readonly legacyAlphaFallbackEnabled: () => boolean
+  private readonly applyWalletDelta: typeof applyWalletDeltaInTransaction
+
+  constructor(dependencies: BetServiceDependencies = {}) {
+    this.betRepository = dependencies.betRepository ?? getBetRepository()
+    this.walletRepository = dependencies.walletRepository ?? getWalletRepository()
+    this.raceRepository = dependencies.raceRepository ?? getRaceRepository()
+    this.userService = dependencies.userService ?? getUserService()
+    this.financialClient =
+      dependencies.financialClient ?? getNinesFinancialClient()
+    this.poolFactory = dependencies.poolFactory ?? getPool
+    this.legacyAlphaFallbackEnabled =
+      dependencies.legacyAlphaFallbackEnabled ??
+      isLegacyAlphaFinancialFallbackEnabled
+    this.applyWalletDelta =
+      dependencies.applyWalletDelta ?? applyWalletDeltaInTransaction
+  }
 
   async placeBet(input: PlaceBetInput): Promise<PlaceBetResult> {
     ensurePositiveStake(input.stakeMinor)
@@ -85,7 +147,86 @@ export class DefaultBetService implements BetService {
     }
 
     const currency = normalizeCurrency(input.currency)
-    const pool = getPool()
+    const financialCurrency = requireCanonicalFinancialCurrency(currency)
+
+    if (this.legacyAlphaFallbackEnabled()) {
+      return this.placeBetViaLegacyAlphaMutation(input, financialCurrency)
+    }
+
+    const betId = randomUUID()
+    const idempotencyKey =
+      input.idempotencyKey?.trim() || `bet:${betId}:reserve-stake`
+    const wallet = await this.walletRepository.findWalletByUserId(
+      input.userId,
+      financialCurrency,
+    )
+
+    if (!wallet) {
+      throw new NotFoundError('wallet not found')
+    }
+
+    const financialReservation = await this.financialClient.reserveStake({
+      idempotencyKey,
+      correlationId: `bet:${betId}`,
+      causationId: `race:${input.raceId}`,
+      userId: input.userId,
+      betId,
+      raceId: input.raceId,
+      selectionId: input.selectionId,
+      stakeMinor: input.stakeMinor.toString(),
+      currency: financialCurrency,
+    })
+    const pool = this.poolFactory()
+    const client = await pool.connect()
+
+    try {
+      await client.query('begin')
+
+      const bet = await this.betRepository.createBet(
+        {
+          id: betId,
+          userId: input.userId,
+          walletId: wallet.id,
+          raceId: input.raceId,
+          currency: financialCurrency,
+          betType: normalizeBetType(),
+          selectionId: input.selectionId,
+          stakeMinor: input.stakeMinor,
+          payoutMinor: null,
+          status: 'placed',
+          resultStatus: 'pending',
+          metadata: {
+            ...(input.metadata ?? {}),
+            financialAuthority: 'nines-financial',
+            financialReservationId: financialReservation.reservationId,
+          },
+        },
+        client,
+      )
+
+      await client.query('commit')
+      return {
+        bet,
+        wallet,
+        ledgerEntry: null,
+        financialReservation,
+      }
+    } catch (error) {
+      await client.query('rollback')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  private async placeBetViaLegacyAlphaMutation(
+    input: PlaceBetInput,
+    currency: FinancialCurrency,
+  ): Promise<PlaceBetResult> {
+    assertLegacyAlphaFinancialMutationPath('DefaultBetService.placeBet')
+    void LEGACY_ALPHA_FINANCIAL_AUTHORITY_WARNING
+
+    const pool = this.poolFactory()
     const client = await pool.connect()
 
     try {
@@ -122,7 +263,7 @@ export class DefaultBetService implements BetService {
         client,
       )
 
-      const adjusted = await applyWalletDeltaInTransaction(
+      const adjusted = await this.applyWalletDelta(
         {
           userId: input.userId,
           amountMinor: -input.stakeMinor,
@@ -145,6 +286,7 @@ export class DefaultBetService implements BetService {
         bet,
         wallet: adjusted.wallet,
         ledgerEntry: adjusted.ledgerEntry,
+        financialReservation: null,
       }
     } catch (error) {
       await client.query('rollback')

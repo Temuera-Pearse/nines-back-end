@@ -18,7 +18,7 @@ const { userServiceMock, walletServiceMock } = vi.hoisted(() => ({
       wallet: {
         id: 'wallet-1',
         userId: 'user-1',
-        currency: 'USD',
+        currency: 'USDC',
         balanceMinor: 0n,
         createdAt: new Date('2026-03-21T00:00:00.000Z'),
         updatedAt: new Date('2026-03-21T00:00:00.000Z'),
@@ -60,7 +60,7 @@ const { userServiceMock, walletServiceMock } = vi.hoisted(() => ({
     getWalletByUserId: vi.fn(async () => ({
       id: 'wallet-1',
       userId: 'user-1',
-      currency: 'USD',
+      currency: 'USDC',
       balanceMinor: 5000n,
       createdAt: new Date('2026-03-21T00:00:00.000Z'),
       updatedAt: new Date('2026-03-21T00:00:00.000Z'),
@@ -69,7 +69,7 @@ const { userServiceMock, walletServiceMock } = vi.hoisted(() => ({
       wallet: {
         id: 'wallet-1',
         userId: 'user-1',
-        currency: 'USD',
+        currency: 'USDC',
         balanceMinor: 7500n,
         createdAt: new Date('2026-03-21T00:00:00.000Z'),
         updatedAt: new Date('2026-03-21T00:00:00.000Z'),
@@ -128,7 +128,7 @@ describe('userRoutes', () => {
       username: 'alpha-user',
       email: 'alpha@example.com',
       dateOfBirth: '2000-01-01',
-      currency: 'USD',
+      currency: 'USDC',
     })
 
     expect(res.status).toBe(201)

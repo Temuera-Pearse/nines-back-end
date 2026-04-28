@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import { getPool } from '../db/pool.js'
 import { getUserRepository } from '../db/userRepository.js'
 import { getWalletRepository } from '../db/walletRepository.js'
+import { normalizeFinancialCurrency } from '../financial/legacyAlphaFinancialAuthority.js'
 import { deriveInitialAgeVerificationStatus } from '../user/ageGate.js'
 import {
   ConflictError,
@@ -40,7 +41,7 @@ function normalizeEmail(email?: string | null): string | null {
 }
 
 function normalizeCurrency(currency?: string): string {
-  return (currency || 'USD').trim().toUpperCase()
+  return normalizeFinancialCurrency(currency)
 }
 
 function validateDateOfBirth(dateOfBirth: string): void {

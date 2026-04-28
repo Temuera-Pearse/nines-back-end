@@ -10,7 +10,7 @@ const { betServiceMock } = vi.hoisted(() => ({
         userId: 'user-1',
         walletId: 'wallet-1',
         raceId: 'race-1',
-        currency: 'USD',
+        currency: 'USDC',
         betType: 'win',
         selectionId: 'horse-3',
         stakeMinor: 1200n,
@@ -27,21 +27,15 @@ const { betServiceMock } = vi.hoisted(() => ({
       wallet: {
         id: 'wallet-1',
         userId: 'user-1',
-        currency: 'USD',
-        balanceMinor: 3800n,
+        currency: 'USDC',
+        balanceMinor: 5000n,
         createdAt: new Date('2026-03-22T00:00:00.000Z'),
         updatedAt: new Date('2026-03-22T00:00:00.000Z'),
       },
-      ledgerEntry: {
-        id: 3,
-        walletId: 'wallet-1',
-        entryType: 'bet_stake',
-        deltaMinor: -1200n,
-        balanceAfterMinor: 3800n,
-        referenceType: 'bet',
-        referenceId: 'bet-1',
-        metadata: { raceId: 'race-1', selectionId: 'horse-3' },
-        createdAt: new Date('2026-03-22T00:00:00.000Z'),
+      ledgerEntry: null,
+      financialReservation: {
+        reservationId: 'reservation-1',
+        acceptedAt: '2026-03-22T00:00:00.000Z',
       },
     })),
     getBetById: vi.fn(async () => ({
@@ -49,7 +43,7 @@ const { betServiceMock } = vi.hoisted(() => ({
       userId: 'user-1',
       walletId: 'wallet-1',
       raceId: 'race-1',
-      currency: 'USD',
+      currency: 'USDC',
       betType: 'win',
       selectionId: 'horse-3',
       stakeMinor: 1200n,
@@ -69,7 +63,7 @@ const { betServiceMock } = vi.hoisted(() => ({
         userId: 'user-1',
         walletId: 'wallet-1',
         raceId: 'race-1',
-        currency: 'USD',
+        currency: 'USDC',
         betType: 'win',
         selectionId: 'horse-3',
         stakeMinor: 1200n,
@@ -122,13 +116,14 @@ describe('betRoutes', () => {
       raceId: 'race-1',
       selectionId: 'horse-3',
       stakeMinor: '1200',
-      currency: 'USD',
+      currency: 'USDC',
     })
 
     expect(res.status).toBe(201)
     expect(res.body.bet.id).toBe('bet-1')
-    expect(res.body.wallet.balanceMinor).toBe('3800')
-    expect(res.body.ledgerEntry.deltaMinor).toBe('-1200')
+    expect(res.body.wallet.balanceMinor).toBe('5000')
+    expect(res.body.ledgerEntry).toBeNull()
+    expect(res.body.financialReservation.reservationId).toBe('reservation-1')
   })
 
   it('returns a bet by id', async () => {

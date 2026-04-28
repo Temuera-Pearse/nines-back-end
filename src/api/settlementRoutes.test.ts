@@ -20,7 +20,7 @@ const { settlementServiceMock } = vi.hoisted(() => ({
             userId: 'user-1',
             walletId: 'wallet-1',
             raceId: 'race-1',
-            currency: 'USD',
+            currency: 'USDC',
             betType: 'win',
             selectionId: 'horse-3',
             stakeMinor: 1200n,
@@ -34,17 +34,7 @@ const { settlementServiceMock } = vi.hoisted(() => ({
             createdAt: new Date('2026-03-22T00:00:00.000Z'),
             updatedAt: new Date('2026-03-22T00:01:00.000Z'),
           },
-          ledgerEntry: {
-            id: 10,
-            walletId: 'wallet-1',
-            entryType: 'settlement_credit',
-            deltaMinor: 2400n,
-            balanceAfterMinor: 6200n,
-            referenceType: 'bet',
-            referenceId: 'bet-1',
-            metadata: { raceId: 'race-1' },
-            createdAt: new Date('2026-03-22T00:01:00.000Z'),
-          },
+          ledgerEntry: null,
         },
         {
           bet: {
@@ -52,7 +42,7 @@ const { settlementServiceMock } = vi.hoisted(() => ({
             userId: 'user-2',
             walletId: 'wallet-2',
             raceId: 'race-1',
-            currency: 'USD',
+            currency: 'USDC',
             betType: 'win',
             selectionId: 'horse-1',
             stakeMinor: 1200n,
@@ -110,7 +100,7 @@ describe('settlementRoutes', () => {
     expect(res.body.settlement.raceId).toBe('race-1')
     expect(res.body.settlement.totalPayoutMinor).toBe('2400')
     expect(res.body.settlement.settledBets).toHaveLength(2)
-    expect(res.body.settlement.settledBets[0].ledgerEntry.deltaMinor).toBe('2400')
+    expect(res.body.settlement.settledBets[0].ledgerEntry).toBeNull()
   })
 
   it('requires an admin token when configured', async () => {

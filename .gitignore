@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+.vite/
+.vitest/
+test-results/
+vitest-results.json
+*.lcov
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+data/races/race-*/

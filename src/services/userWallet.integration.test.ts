@@ -47,7 +47,7 @@ describeIfDatabase('user and wallet integration', () => {
       username: 'alpha-integration',
       email: 'alpha-integration@example.com',
       dateOfBirth: '2000-02-01',
-      currency: 'USD',
+      currency: 'USDC',
     })
 
     expect(created.user.accountStatus).toBe('active')
@@ -57,7 +57,7 @@ describeIfDatabase('user and wallet integration', () => {
     const credited = await walletService.creditWallet({
       userId: created.user.id,
       amountMinor: 2500n,
-      currency: 'USD',
+      currency: 'USDC',
       entryType: 'admin_credit',
       referenceType: 'admin',
       referenceId: 'seed-1',
@@ -75,7 +75,7 @@ describeIfDatabase('user and wallet integration', () => {
     const created = await userService.createUser({
       username: 'underage-user',
       dateOfBirth: '2012-01-01',
-      currency: 'USD',
+      currency: 'USDC',
     })
 
     expect(created.user.accountStatus).toBe('restricted')

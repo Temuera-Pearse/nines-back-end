@@ -152,6 +152,8 @@ router.post(
   requireAdminApiToken,
   async (req, res) => {
     try {
+      // TODO(phase-2.5): Alpha-only admin credit path. Real funding must be
+      // posted by nines-financial, not this backend wallet ledger.
       const entryType = (req.body?.entryType ||
         'admin_credit') as WalletLedgerEntryType
       const adjusted = await walletService.creditWallet({

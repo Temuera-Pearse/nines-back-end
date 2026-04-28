@@ -49,5 +49,6 @@ export interface PlaceBetInput {
   stakeMinor: bigint
   currency?: string
   betType?: BetType
+  idempotencyKey?: string
   metadata?: Record<string, unknown>
 }

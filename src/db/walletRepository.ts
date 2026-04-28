@@ -1,5 +1,6 @@
 import type { Pool, PoolClient, QueryResultRow } from 'pg'
 import { getOptionalPool } from './pool.js'
+import { CANONICAL_FRONT_OF_HOUSE_CURRENCY } from '../financial/legacyAlphaFinancialAuthority.js'
 import type { WalletRecord } from '../user/types.js'
 
 type Queryable = Pool | PoolClient
@@ -87,7 +88,7 @@ export class PgWalletRepository implements WalletRepository {
 
   async findWalletByUserId(
     userId: string,
-    currency = 'USD',
+    currency = CANONICAL_FRONT_OF_HOUSE_CURRENCY,
   ): Promise<WalletRecord | null> {
     const pool = getOptionalPool()
     if (!pool) return null

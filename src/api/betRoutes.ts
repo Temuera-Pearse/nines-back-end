@@ -77,6 +77,18 @@ function handleRouteError(error: unknown, res: Response): void {
 const router = Router()
 const betService = getBetService()
 
+function readIdempotencyKey(req: Request): string | undefined {
+  const headerValue = req.headers['idempotency-key']
+
+  if (typeof headerValue === 'string' && headerValue.trim()) {
+    return headerValue.trim()
+  }
+
+  return typeof req.body?.idempotencyKey === 'string'
+    ? req.body.idempotencyKey.trim()
+    : undefined
+}
+
 router.post('/', requireApiToken, async (req, res) => {
   try {
     const placed = await betService.placeBet({
@@ -85,6 +97,7 @@ router.post('/', requireApiToken, async (req, res) => {
       selectionId: req.body?.selectionId,
       stakeMinor: parseAmountMinor(req.body?.stakeMinor),
       currency: req.body?.currency,
+      idempotencyKey: readIdempotencyKey(req),
       metadata: req.body?.metadata,
     })
 
@@ -98,17 +111,20 @@ router.post('/', requireApiToken, async (req, res) => {
         createdAt: placed.wallet.createdAt,
         updatedAt: placed.wallet.updatedAt,
       },
-      ledgerEntry: {
-        id: placed.ledgerEntry.id,
-        walletId: placed.ledgerEntry.walletId,
-        entryType: placed.ledgerEntry.entryType,
-        deltaMinor: placed.ledgerEntry.deltaMinor.toString(),
-        balanceAfterMinor: placed.ledgerEntry.balanceAfterMinor.toString(),
-        referenceType: placed.ledgerEntry.referenceType,
-        referenceId: placed.ledgerEntry.referenceId,
-        metadata: placed.ledgerEntry.metadata,
-        createdAt: placed.ledgerEntry.createdAt,
-      },
+      ledgerEntry: placed.ledgerEntry
+        ? {
+            id: placed.ledgerEntry.id,
+            walletId: placed.ledgerEntry.walletId,
+            entryType: placed.ledgerEntry.entryType,
+            deltaMinor: placed.ledgerEntry.deltaMinor.toString(),
+            balanceAfterMinor: placed.ledgerEntry.balanceAfterMinor.toString(),
+            referenceType: placed.ledgerEntry.referenceType,
+            referenceId: placed.ledgerEntry.referenceId,
+            metadata: placed.ledgerEntry.metadata,
+            createdAt: placed.ledgerEntry.createdAt,
+          }
+        : null,
+      financialReservation: placed.financialReservation,
     })
   } catch (error) {
     handleRouteError(error, res)

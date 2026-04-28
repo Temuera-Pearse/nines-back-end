@@ -58,6 +58,7 @@ describeIfDatabase('bet placement integration', () => {
   })
 
   beforeEach(async () => {
+    process.env.NINES_ENABLE_LEGACY_ALPHA_FINANCIAL_FALLBACK = 'true'
     const pool = getPool()
     await pool.query(
       'truncate table bets, wallet_ledger_entries, wallets, users, race_artifacts, races restart identity cascade',
@@ -67,12 +68,13 @@ describeIfDatabase('bet placement integration', () => {
   })
 
   afterAll(async () => {
+    delete process.env.NINES_ENABLE_LEGACY_ALPHA_FINANCIAL_FALLBACK
     RaceState.setPrecomputedRace(null)
     RaceState.setCurrentRace(null)
     await closePool()
   })
 
-  it('places a bet atomically and debits the wallet', async () => {
+  it('keeps the explicit legacy alpha fallback for wallet debits', async () => {
     const raceId = 'race-open-1'
     RaceState.setPrecomputedRace(makeOpenRace(raceId))
 
@@ -88,13 +90,13 @@ describeIfDatabase('bet placement integration', () => {
       username: 'bettor-alpha',
       email: 'bettor-alpha@example.com',
       dateOfBirth: '2000-01-01',
-      currency: 'USD',
+      currency: 'USDC',
     })
 
     await walletService.creditWallet({
       userId: created.user.id,
       amountMinor: 5000n,
-      currency: 'USD',
+      currency: 'USDC',
       entryType: 'admin_credit',
       referenceType: 'admin',
       referenceId: 'seed-balance',
@@ -105,15 +107,16 @@ describeIfDatabase('bet placement integration', () => {
       raceId,
       selectionId: 'horse-2',
       stakeMinor: 1200n,
-      currency: 'USD',
+      currency: 'USDC',
       metadata: { source: 'integration-test' },
     })
 
     expect(placed.bet.status).toBe('placed')
     expect(placed.bet.resultStatus).toBe('pending')
     expect(placed.wallet.balanceMinor).toBe(3800n)
-    expect(placed.ledgerEntry.entryType).toBe('bet_stake')
-    expect(placed.ledgerEntry.referenceId).toBe(placed.bet.id)
+    expect(placed.ledgerEntry).not.toBeNull()
+    expect(placed.ledgerEntry?.entryType).toBe('bet_stake')
+    expect(placed.ledgerEntry?.referenceId).toBe(placed.bet.id)
 
     const pool = getPool()
     const betCount = await pool.query<{ count: number }>(
@@ -144,13 +147,13 @@ describeIfDatabase('bet placement integration', () => {
     const created = await userService.createUser({
       username: 'bettor-beta',
       dateOfBirth: '2000-01-01',
-      currency: 'USD',
+      currency: 'USDC',
     })
 
     await walletService.creditWallet({
       userId: created.user.id,
       amountMinor: 5000n,
-      currency: 'USD',
+      currency: 'USDC',
       entryType: 'admin_credit',
       referenceType: 'admin',
       referenceId: 'seed-balance',
@@ -165,7 +168,7 @@ describeIfDatabase('bet placement integration', () => {
       }),
     ).rejects.toThrow('selection is not valid for race')
 
-    const wallet = await walletService.getWalletByUserId(created.user.id, 'USD')
+    const wallet = await walletService.getWalletByUserId(created.user.id, 'USDC')
     expect(wallet.balanceMinor).toBe(5000n)
   })
 })
