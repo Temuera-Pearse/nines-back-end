@@ -22,6 +22,34 @@ function expectedAdminToken(): string {
   )
 }
 
+function allowedAdminHealthOrigins(): Set<string> {
+  const configured = (process.env.NINES_ADMIN_CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+
+  return new Set([
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    ...configured,
+  ])
+}
+
+function setAdminHealthCors(req: Request, res: Response): void {
+  const origin = req.headers.origin
+  if (typeof origin !== 'string') return
+  if (!allowedAdminHealthOrigins().has(origin)) return
+
+  res.setHeader('Vary', 'Origin')
+  res.setHeader('Access-Control-Allow-Origin', origin)
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
+  res.setHeader(
+    'Access-Control-Allow-Headers',
+    'Accept, Authorization, Content-Type, x-admin-token',
+  )
+  res.setHeader('Access-Control-Max-Age', '600')
+}
+
 function requireAdminAccess(req: Request, res: Response, next: NextFunction) {
   const expected = expectedAdminToken()
   if (expected) {
@@ -38,6 +66,20 @@ function requireAdminAccess(req: Request, res: Response, next: NextFunction) {
 }
 
 const router = Router()
+
+router.options('/health', (req, res) => {
+  setAdminHealthCors(req, res)
+  res.status(204).send()
+})
+
+router.get('/health', (req, res) => {
+  setAdminHealthCors(req, res)
+  res.json({
+    status: 'healthy',
+    service: 'nines-back-end',
+    timestamp: new Date().toISOString(),
+  })
+})
 
 router.get('/race-data-persistence', requireAdminAccess, (_req, res) => {
   res.json(getRaceDataPersistencePolicy())

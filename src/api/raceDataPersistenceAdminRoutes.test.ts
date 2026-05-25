@@ -32,6 +32,43 @@ afterEach(() => {
 })
 
 describe('raceDataPersistenceAdminRoutes', () => {
+  it('returns admin-compatible backend health without persistence access', async () => {
+    process.env.NINES_SIMULATION_MODE = 'true'
+    process.env.NINES_RACE_DATA_PERSISTENCE_ENABLED = 'false'
+    process.env.NINES_RACE_DATA_PERSISTENCE_ADMIN_TOKEN = 'secret'
+
+    const res = await request(makeApp())
+      .get('/admin/health')
+      .set('Origin', 'http://localhost:5173')
+
+    expect(res.status).toBe(200)
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://localhost:5173',
+    )
+    expect(res.body).toMatchObject({
+      status: 'healthy',
+      service: 'nines-back-end',
+    })
+    expect(new Date(res.body.timestamp).toString()).not.toBe('Invalid Date')
+  })
+
+  it('handles admin health CORS preflight for local admin dev', async () => {
+    const res = await request(makeApp())
+      .options('/admin/health')
+      .set('Origin', 'http://127.0.0.1:5173')
+      .set('Access-Control-Request-Method', 'GET')
+      .set('Access-Control-Request-Headers', 'content-type,authorization')
+
+    expect(res.status).toBe(204)
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://127.0.0.1:5173',
+    )
+    expect(res.headers['access-control-allow-methods']).toContain('GET')
+    expect(res.headers['access-control-allow-headers']).toContain(
+      'Authorization',
+    )
+  })
+
   it('returns the default disabled policy', async () => {
     const res = await request(makeApp()).get('/admin/race-data-persistence')
 
