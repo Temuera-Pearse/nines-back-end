@@ -2,6 +2,7 @@ import { PrecomputedRace, Race } from './raceTypes.js'
 import { RaceStateMachine } from './stateMachine.js'
 
 import { hashStringToInt } from './rng.js'
+import { getRaceHistoryLimit } from '../observability/raceAuthorityStoragePolicy.js'
 const ts = () => new Date().toISOString()
 
 /**
@@ -272,7 +273,10 @@ export class RaceState {
       })
       this.previousRace = this.precomputed
       this.history.unshift(this.precomputed)
-      if (this.history.length > 20) this.history = this.history.slice(0, 20)
+      const historyLimit = getRaceHistoryLimit()
+      if (this.history.length > historyLimit) {
+        this.history = this.history.slice(0, historyLimit)
+      }
       this.precomputed = null
     }
     this.currentRace = null

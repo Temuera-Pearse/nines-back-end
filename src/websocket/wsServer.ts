@@ -75,6 +75,12 @@ function buildWinnerDeclaredPayload(
   }
 }
 
+function sanitizeRaceConfig(config: unknown) {
+  if (!config || typeof config !== 'object') return config
+  const { seed: _seed, ...publicConfig } = config as Record<string, unknown>
+  return publicConfig
+}
+
 function maybeReplayWinnerDeclared(
   ws: WebSocket,
   pre: PrecomputedRace,
@@ -236,7 +242,7 @@ export class RaceWebSocketServer {
             protoVer: PROTO_VER,
             raceId: pre.id,
             horseOrder: pre.horses.map((h) => h.id),
-            config: pre.config,
+            config: sanitizeRaceConfig(pre.config),
             currentTickIndex,
           }),
         )

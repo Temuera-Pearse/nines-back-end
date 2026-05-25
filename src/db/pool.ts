@@ -1,8 +1,10 @@
 import { Pool } from 'pg'
+import { isRaceDataPersistenceEnabled } from '../persistence/raceDataPersistencePolicy.js'
 
 let pool: Pool | null = null
 
 export function isDatabaseConfigured(): boolean {
+  if (!isRaceDataPersistenceEnabled()) return false
   return Boolean(process.env.DATABASE_URL)
 }
 
@@ -29,6 +31,7 @@ export function getOptionalPool(): Pool | null {
 }
 
 export async function verifyPool(): Promise<void> {
+  if (!isRaceDataPersistenceEnabled()) return
   const next = initPool()
   if (!next) return
   await next.query('select 1')

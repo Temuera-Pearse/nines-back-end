@@ -32,6 +32,8 @@ import type { WinnerResult } from './winner.js'
 import { getRacePersistence } from '../persistence/racePersistence.js'
 import { getRaceRepository } from '../db/raceRepository.js'
 import { getRaceArtifactRepository } from '../db/raceArtifactRepository.js'
+import { getRaceArtifactStoragePolicy } from '../observability/raceAuthorityStoragePolicy.js'
+import { recordArtifactWrite } from '../observability/raceAuthoritySignals.js'
 
 // Easing helpers for smooth curves
 const easeInQuad = (t: number) => t * t
@@ -107,6 +109,11 @@ function buildAuthoritativeFinishPayload(
   }
 }
 
+function sanitizeRaceConfig(config: RaceConfig): Omit<RaceConfig, 'seed'> {
+  const { seed: _seed, ...publicConfig } = config
+  return publicConfig
+}
+
 function buildWinnerDeclaredPayload(
   pre: PrecomputedRace,
 ): RaceWinnerDeclaredPayload | null {
@@ -180,8 +187,21 @@ function announceWinnerDeclaredIfNeeded(currentTickIndex: number): void {
 
 function persistCompletedRace(pre: PrecomputedRace): void {
   try {
+    const storagePolicy = getRaceArtifactStoragePolicy()
     if (!pre.finalHorseStateMatrix || !pre.eventTimeline) {
       persistence.markUnsaved(pre.id)
+      recordArtifactWrite({
+        raceId: pre.id,
+        status: 'unsaved',
+        wroteArtifacts: false,
+        artifactCountsByType: {},
+        artifactsTotal: 0,
+        eventsCount: 0,
+        hasPrecomputedPaths: false,
+        hasTickStream: false,
+        storageMode: storagePolicy.storageMode,
+        error: 'Missing final race artifacts in memory',
+      })
       void raceRepository
         .markRaceFinished({
           raceId: pre.id,
@@ -226,9 +246,67 @@ function persistCompletedRace(pre: PrecomputedRace): void {
       config: pre.config,
       checksum: pre.checksum,
     }
+
+    if (!storagePolicy.persistArtifacts || storagePolicy.artifactDryRun) {
+      const eventsCount = countTimelineEvents(pre.eventTimeline)
+      recordArtifactWrite({
+        raceId: pre.id,
+        status: !storagePolicy.persistArtifacts
+          ? 'disabled'
+          : storagePolicy.artifactDryRun
+            ? 'dry_run'
+            : 'disabled',
+        wroteArtifacts: false,
+        artifactCountsByType: {},
+        artifactsTotal: 0,
+        eventsCount,
+        hasPrecomputedPaths: false,
+        hasTickStream: false,
+        storageMode: storagePolicy.storageMode,
+        error: null,
+      })
+      void raceRepository
+        .markRaceFinished({
+          raceId: pre.id,
+          actualEndTime: pre.endTime ?? null,
+          checksum: pre.checksum ?? null,
+          winnerId: pre.winnerId,
+          finishOrder: [...pre.finishOrder],
+          finishTimesMs: { ...pre.finishTimesMs },
+          config: pre.config as unknown as Record<string, unknown>,
+          hasTickStream: false,
+          hasPrecomputedPaths: false,
+          eventsCount,
+          persistenceStatus: 'unsaved',
+          lifecycleStatus: 'results_showing',
+        })
+        .catch(() => {})
+      return
+    }
+
     void persistence
       .saveRace(pre.id, data as any)
       .then(async (result) => {
+        const artifactCountsByType = result.artifacts.reduce(
+          (counts, artifact) => {
+            counts[artifact.artifactType] =
+              (counts[artifact.artifactType] ?? 0) + 1
+            return counts
+          },
+          {} as Record<string, number>,
+        )
+        recordArtifactWrite({
+          raceId: pre.id,
+          status: result.persistenceStatus,
+          wroteArtifacts: result.artifacts.length > 0,
+          artifactCountsByType,
+          artifactsTotal: result.artifacts.length,
+          eventsCount: result.eventsCount,
+          hasPrecomputedPaths: result.hasPrecomputedPaths,
+          hasTickStream: result.hasTickStream,
+          storageMode: storagePolicy.storageMode,
+          error: null,
+        })
         await raceRepository.markRaceFinished({
           raceId: pre.id,
           actualEndTime: pre.endTime ?? null,
@@ -257,6 +335,18 @@ function persistCompletedRace(pre: PrecomputedRace): void {
       })
       .catch(async (e) => {
         log(`[${ts()}][PERSIST][${pre.id}] ${e?.message || e}`)
+        recordArtifactWrite({
+          raceId: pre.id,
+          status: 'unsaved',
+          wroteArtifacts: false,
+          artifactCountsByType: {},
+          artifactsTotal: 0,
+          eventsCount: 0,
+          hasPrecomputedPaths: false,
+          hasTickStream: false,
+          storageMode: storagePolicy.storageMode,
+          error: e?.message ?? String(e),
+        })
         await raceRepository.markRaceFinished({
           raceId: pre.id,
           actualEndTime: pre.endTime ?? null,
@@ -274,11 +364,31 @@ function persistCompletedRace(pre: PrecomputedRace): void {
       })
   } catch (e: any) {
     log(`[${ts()}][PERSIST][${pre.id}] compose-error ${e?.message || e}`)
+    recordArtifactWrite({
+      raceId: pre.id,
+      status: 'unsaved',
+      wroteArtifacts: false,
+      artifactCountsByType: {},
+      artifactsTotal: 0,
+      eventsCount: 0,
+      hasPrecomputedPaths: false,
+      hasTickStream: false,
+      storageMode: getRaceArtifactStoragePolicy().storageMode,
+      error: e?.message ?? String(e),
+    })
     try {
       persistence.markUnsaved(pre.id)
     } catch {}
     void raceRepository.markPersistenceStatus(pre.id, 'unsaved').catch(() => {})
   }
+}
+
+function countTimelineEvents(
+  timeline: NonNullable<PrecomputedRace['eventTimeline']>,
+): number {
+  let count = 0
+  for (const events of timeline.values()) count += events.length
+  return count
 }
 
 /**
@@ -592,13 +702,12 @@ export function seedPrecomputedRace(): PrecomputedRace {
     .catch((e) =>
       log(`[${ts()}][DB][${raceId}] seed-upsert-error ${e?.message || e}`),
     )
-
   try {
     RaceWebSocketServer.broadcast({
       type: 'race:info',
       raceId: precomputed!.id,
       horseOrder: precomputed!.horses.map((h) => h.id),
-      config: precomputed!.config,
+      config: sanitizeRaceConfig(precomputed!.config),
       currentTickIndex: -1,
     })
   } catch {

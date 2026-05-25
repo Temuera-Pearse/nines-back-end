@@ -1,328 +1,161 @@
-Race Engine
-├─> Persistence Layer (writes ticks, events, race outcomes)
-├─> Global Delivery Layer (aggregates & syncs all regions)
-│ └─> Regional Broadcasters (per region, handle local fan-out)
-│ └─> Clients (worldwide, live race updates)
-└─> Betting System (receives race outcomes, settles bets)
-└─> Clients (worldwide, place bets, see results)
-
-API / Service Layer
-├─> Persistence Layer (reads/writes race history, user data)
-├─> Betting System (reads race outcomes, writes/settles bets)
-└─> Clients (query balances, bet history, place bets)
-
 # Nines Race Backend
 
-Deterministic race engine and delivery backend for a horse racing game. This service precomputes race ticks, streams them in real time via WebSocket, and manages the race lifecycle and recovery.
+`nines-back-end` is the race authority service for Nines. It owns deterministic
+race generation, lifecycle timing, race state, race results, WebSocket race
+streaming, and race artifact persistence.
 
-## System Architecture
+Player, wallet, betting, settlement, financial orchestration, and admin/control
+plane code has been migrated out of this repo. Historical migration material is
+held in `../nines-api/src/migrated-from-backend`.
 
-1️⃣ Race Engine (Authoritative Core)
+## Responsibilities
 
-- Purpose: Computes every race accurately and deterministically.
-- Responsibilities:
-  - Precompute ticks for each race (distance, speed, power-ups).
-  - Determine winners and race outcomes.
-  - Handle race state machine (countdown → race → results → reset).
-  - Store race seeds, last ticks, and minimal memory state.
-  - Validate player actions (bets, interactions, power-ups).
-- Notes:
-  - Stateless instances preferred — can scale horizontally.
-  - Could be Node.js services, AWS Lambda functions, or a mix.
-  - Only one source of truth for all races.
+- Precompute deterministic race ticks from a private seed.
+- Build the event timeline and canonical final horse state matrix.
+- Determine winners and finish ordering.
+- Drive the public race loop: idle, countdown, running, results, reset.
+- Stream race state over WebSocket.
+- Persist completed race summaries and artifacts.
+- Expose safe public race read endpoints.
 
-2️⃣ Broadcasting Layer (Regional Edge Workers)
+This service does not own users, wallets, betting, settlement, deposits,
+withdrawals, platform modes, Auth0 integration, or operator/admin workflows.
 
-- Purpose: Deliver real-time race ticks to clients in the same region.
-- Responsibilities:
-  - Maintain WebSocket connections to thousands of clients per server.
-  - Push each tick packet to connected clients.
-  - Handle late joins or reconnects (serve latest tick or replay recent ticks).
-  - Convert internal tick objects into compact or binary messages for minimal bandwidth.
-- Notes:
-  - Multiple nodes per region handle horizontal scaling.
-  - Subscribes to the Global Delivery Layer for authoritative ticks.
+## Public HTTP Surface
 
-# Nines Race Backend
+Base URL: `http://localhost:3001`
 
-Understandable guide to a deterministic horse-racing backend. This service precomputes each race, streams ticks to clients in real time, exposes simple APIs for inspection, and saves finished races for audits and replay.
+- `GET /health`
+- `GET /race/current`
+- `GET /race/previous`
+- `GET /race/history`
+- `GET /race/results/:raceId`
+- `GET /race/config`
 
-This README is written for junior developers. It explains how things work step by step, provides practical examples, and includes a glossary of common terms.
+## Internal Observe-Only Surface
 
-## Quick Start
+Mission Control uses a separate read-only race authority endpoint:
 
-1. Install dependencies and run the server (Node 18+):
+- `GET /internal/race-authority/summary`
+- `GET /admin/race-data-persistence`
+- `POST /admin/race-data-persistence`
+
+These routes are not part of the public race surface. The internal summary route
+is hidden unless
+`NINES_ENABLE_INTERNAL_RACE_AUTHORITY=1` is set. In production,
+`NINES_INTERNAL_RACE_AUTHORITY_TOKEN` must also be configured and clients must
+send it as a bearer token. Local development may run without the token only when
+the route is explicitly env-enabled.
+
+The race data persistence admin routes are read/write operational controls. In
+production, configure `NINES_RACE_DATA_PERSISTENCE_ADMIN_TOKEN`,
+`NINES_ADMIN_TOKEN`, or `NINES_INTERNAL_RACE_AUTHORITY_TOKEN` and send it as a
+bearer token. `POST /admin/race-data-persistence` accepts
+`{ "enabled": boolean, "reason": "optional text" }` and emits an audit log when
+the runtime setting changes.
+
+Completed-race artifact endpoints remain available only after the active race is
+complete:
+
+- `GET /race/ticks/:raceId`
+- `GET /race/ticks-final/:raceId`
+- `GET /race/timeline/:raceId`
+
+The service no longer exposes `/users`, `/bets`, `/settlements`, general
+`/admin` mutation routes, `/metrics`, or `/race/metrics`.
+
+## Public Data Safety
+
+Public race summaries and WebSocket `race:info` messages remove deterministic
+seed data from race config. Full tick, final-matrix, and timeline artifacts are
+blocked for the active race until completion so clients cannot inspect the
+outcome early.
+
+Persisted artifacts may still contain private deterministic audit data on disk or
+in object storage. Treat artifact storage as backend/internal infrastructure, not
+as a public bucket.
+
+For the public race-loop milestone, all race data persistence is disabled by
+default with `NINES_RACE_DATA_PERSISTENCE_ENABLED=false`. When disabled, the
+runtime does not write race summaries, ticks, timelines, precomputed paths, race
+metadata, local artifacts, or S3 artifacts. Enable the full race-data write path
+explicitly with `NINES_RACE_DATA_PERSISTENCE_ENABLED=true`; use
+`NINES_ARTIFACT_DRY_RUN=true` to report artifact write intent without writing
+artifact payloads. In-memory completed-race history is bounded by
+`NINES_RACE_HISTORY_LIMIT` (default `10`) so live memory does not grow
+indefinitely.
+
+## Simulation Mode
+
+Set `NINES_SIMULATION_MODE=true` for public demo or alpha simulation
+deployments:
+
+```bash
+NINES_SIMULATION_MODE=true npm run dev
+```
+
+When enabled, the service logs:
+
+```text
+NINES_SIMULATION_MODE enabled: persistence and financial writes disabled.
+```
+
+Simulation mode keeps race generation, lifecycle timing, WebSocket streaming,
+engine metrics, public race reads, and internal Mission Control observability
+working. It deliberately disables normal-runtime write paths:
+
+- Postgres is not required and `DATABASE_URL` is ignored by the runtime.
+- Race metadata writes are skipped.
+- Race artifact writes are skipped, even if
+  `NINES_RACE_DATA_PERSISTENCE_ENABLED=true`.
+- Local `data/races` summaries, ticks, timelines, precomputed paths, and
+  `UNSAVED.flag` markers are not written.
+- S3 artifact writes are skipped.
+- Financial service calls remain absent from this race-authority service.
+
+On restart, simulation mode regenerates in-memory race state and lets the public
+race loop continue from memory. This mode is for demos and alpha public race-loop
+testing only. It is not suitable for real-money betting, accounting, settlement,
+audit, compliance, or any deployment that requires durable replayable race
+records.
+
+## Project Structure
+
+- `src/race`: deterministic engine, lifecycle, state machine, events, winner logic.
+- `src/websocket`: live race streaming and reconnect catch-up.
+- `src/api/raceRoutes.ts`: safe race read endpoints.
+- `src/persistence`: race artifact persistence.
+- `src/services`: race read/artifact loading services only.
+- `src/db`: race metadata and race artifact repositories only.
+- `src/metrics`: internal engine metrics used by the runtime.
+
+## Run
 
 ```bash
 npm install
 npm run dev
 ```
 
-If you are using the alpha Postgres metadata layer, apply migrations first:
+Apply the remaining race metadata migration when using Postgres:
 
 ```bash
 DATABASE_URL=postgres://localhost:5432/nines_dev npm run db:migrate
 ```
 
-Backfill existing archived races into Postgres metadata with:
+Backfill existing archived race artifacts into race metadata with:
 
 ```bash
 DATABASE_URL=postgres://localhost:5432/nines_dev npm run db:backfill:races
 ```
 
-2. Open the health check:
+## Verify
 
 ```bash
-open http://localhost:3001/health
+npm run typecheck
+npm test
+npm run build
+npm run verify
 ```
 
-3. Explore APIs (examples below) and connect a WebSocket client to watch the live ticks.
-
-## High-Level Overview
-
-- The engine computes the whole race ahead of time (deterministic precompute).
-- It creates a timeline of race events (power-ups, hazards) and applies them to horses.
-- The result is a canonical “final matrix” of horse state for every tick.
-- A WebSocket broadcasts ticks at a regular interval based on this matrix.
-- When the race finishes, the backend saves canonical data to disk.
-
-## Project Structure
-
-- Core engine: [src/race/raceEngine.ts](src/race/raceEngine.ts)
-- State and lifecycle: [src/race/raceState.ts](src/race/raceState.ts), [src/race/stateMachine.ts](src/race/stateMachine.ts)
-- Events: catalog, timeline, and effects
-  - [src/race/events/catalog.ts](src/race/events/catalog.ts)
-  - [src/race/events/timeline.ts](src/race/events/timeline.ts)
-  - [src/race/events/effects.ts](src/race/events/effects.ts)
-- WebSocket server: [src/websocket/wsServer.ts](src/websocket/wsServer.ts)
-- HTTP API routes: [src/api/raceRoutes.ts](src/api/raceRoutes.ts)
-- Metrics: [src/metrics/engineMetrics.ts](src/metrics/engineMetrics.ts)
-- Persistence: [src/persistence/racePersistence.ts](src/persistence/racePersistence.ts)
-- Server entrypoint: [src/server.ts](src/server.ts)
-
-## How the Race Engine Works
-
-The engine turns a seed into a fully determined race. Here are the main steps:
-
-1. Precompute Base Ticks
-   - Create horses with base stats using a single RNG seeded from the current cycle.
-   - Build smooth speed curves per horse (no random at runtime).
-   - Integrate position per tick with a fixed `dtMs` (e.g., 50ms).
-   - Clamp positions at the finish line and compute crossing timestamps.
-   - Output: `ticks`, `finishOrder`, `finishTimesMs`, `winnerId`.
-
-2. Build the Event Timeline
-   - Deterministic timeline across the race using pacing weights (early/mid/final).
-   - Enforces spacing rules and conflict constraints (some events cannot co-exist).
-   - Output: `eventTimeline` (immutable map of tick → events).
-
-3. Apply Event Effects → Canonical Final Matrix
-   - Convert base paths to per-tick horse states: position, lane, speed.
-   - Apply events (stun, boosts, hazards), with deterministic rules.
-   - Produce the canonical `finalHorseStateMatrix` (immutable).
-
-4. Validate and Freeze
-   - Validate units and semantics (no negative positions, proper clamp, stun rules).
-   - Deep-freeze ticks, timeline, and matrix to prevent mutation.
-   - Compute a checksum for auditability.
-
-5. Stream and Finish
-   - Start the race with a `startTime`, stream ticks via WebSocket at `dtMs` intervals.
-   - On finish, broadcast placements and persist canonical artifacts to disk.
-
-## WebSocket Protocol
-
-The server broadcasts messages to all connected clients:
-
-- `race:start` → `{ raceId, horses }`
-- `race:tick` → `PositionUpdate[]` (for each horse: `{ horseId, position }`)
-- `race:finish` → `{ winner, placements }`
-
-Clients can also reconnect mid-race and catch up using the API endpoints below.
-
-## HTTP API Endpoints
-
-Base path: `http://localhost:3001/race`
-
-- `GET /health`
-  - Server status and timestamp.
-
-- `GET /current`
-  - Current race summary: config, finish line, start/end times.
-
-- `GET /previous`
-  - Last completed race summary (if any).
-
-- `GET /history`
-  - Recent race history.
-
-- `GET /ticks/:raceId`
-  - Raw precomputed tick objects (before effects).
-
-- `GET /ticks-final/:raceId`
-  - Canonical positions by tick from the final matrix.
-  - Response: `{ ticksFinal: [{ tickIndex, positions: number[] }] }`
-
-- `GET /timeline/:raceId`
-  - Compact event timeline with `{ tick, events: [{ id, instanceId }] }`.
-
-- `GET /results/:raceId`
-  - Winner and finish times.
-
-- `GET /metrics`
-  - Engine metrics snapshot (tick rate, averages, GC, precompute phases).
-
-Tip: You can use curl or your browser to inspect these endpoints.
-
-## Persistence and Recovery
-
-- When a race finishes, the backend saves a compact summary and canonical artifacts under `data/races/<raceId>/`:
-  - `summary.json` (atomic write): seed, outcome, winner, config, checksum.
-  - `precomputedPaths.json` (final matrix positions over time).
-  - `eventTimeline.json` (tick-indexed compact events).
-  - `ticks.json` (optional raw tick stream; may be partial).
-- If any write fails, an `UNSAVED.flag` is created for that race and errors are logged.
-- On restart, the engine performs recovery to resume streaming and keep the current seed consistent.
-
-## Alpha Primary DB
-
-- Alpha introduces a relational primary DB for durable race metadata and artifact references.
-- Live race authority, active race memory, reconnect buffers, and websocket session state remain in memory.
-- Heavy race artifacts remain outside the DB and are referenced from it.
-
-Environment variables:
-
-- `DATABASE_URL`: Postgres connection string for the alpha metadata database.
-- `RACE_DATA_DIR`: optional override for local artifact storage. Use this to move race data outside the repo tree.
-- `PERSIST_S3_BUCKET`: optional artifact storage bucket. When set, artifact files are written to S3 instead of local disk.
-- `PERSIST_S3_PREFIX`: optional object key prefix for S3-backed artifacts.
-
-Artifacts and metadata can be backfilled from the existing local race archive with:
-
-```bash
-npm run db:backfill:races
-```
-
-## Configuration and Conventions
-
-- Node.js 18+ required; TypeScript strict mode is enabled.
-- Motion units:
-  - Distance: meters
-  - Speed: meters/second
-  - Time: milliseconds
-- Tick interval (`dtMs`) is 50ms by default → 20 ticks/sec.
-- Race duration is ~20s by default (configurable).
-- Environment:
-  - `LOG_VERBOSE=true` for extra logging (optional).
-  - Seed generation (engine remains deterministic per seed):
-    - `SEED_MODE=random` (default) generates a fresh seed each cycle.
-    - `SEED_MODE=deterministic` uses `cycle-<n>` seeds (repeatable across restarts).
-    - `FIXED_SEED=...` forces an exact seed string (always repeats the same race).
-
-## Developing Locally
-
-Run the server:
-
-```bash
-npm install
-npm run dev
-```
-
-Try a few endpoints:
-
-```bash
-curl http://localhost:3001/health
-curl http://localhost:3001/race/current
-curl http://localhost:3001/race/metrics
-```
-
-Connect a WebSocket client to watch `race:tick` messages. See implementation in [src/websocket/wsServer.ts](src/websocket/wsServer.ts).
-
-Key files to explore:
-
-- Engine core and lifecycle: [src/race/raceEngine.ts](src/race/raceEngine.ts), [src/race/engineLoop.ts](src/race/engineLoop.ts)
-- Events and effects: [src/race/events](src/race/events)
-- APIs: [src/api/raceRoutes.ts](src/api/raceRoutes.ts)
-- Persistence: [src/persistence/racePersistence.ts](src/persistence/racePersistence.ts)
-- Metrics: [src/metrics/engineMetrics.ts](src/metrics/engineMetrics.ts)
-
-## Troubleshooting
-
-- “No race seeded” on `/race/current`: Start the engine; it seeds a race and sets `startTime`.
-- Drift warnings in logs: The engine compares wall-clock elapsed to tick timing; small drift is expected on busy machines.
-- Missing canonical artifacts: The event timeline and final matrix are built during precompute; if missing, check logs for earlier errors.
-
-## Glossary (Junior-Friendly)
-
-- Deterministic: Same inputs produce the exact same outputs every time.
-- Seed: A number/string used to initialize the random generator consistently.
-- RNG (Random Number Generator): A function that gives pseudo-random values; here it is seeded for determinism.
-- Tick: A single time step (e.g., every 50ms) in the race simulation.
-- Timeline: A schedule of events placed at specific ticks (e.g., boosts, hazards).
-- Event: A power-up or effect that changes a horse’s state (like speed or stun).
-- Effect: The actual change applied to a horse because of an event.
-- Canonical (Final Matrix): The authoritative per-tick state of each horse after all events are applied.
-- Clamp: Limiting a value to a range (e.g., not letting position exceed the finish line).
-- Drift: Difference between wall-clock elapsed time and tick-based timing; useful for diagnosing sync issues.
-- Placement: The finishing order of horses.
-- Winner: The first horse to cross the finish line according to deterministic rules.
-- Checksum: A hash used to make sure outputs haven’t changed unexpectedly.
-- Persistence: Saving race results and data to disk for later use.
-- Recovery: Logic that helps the engine resume safely after a restart.
-
----
-
-If you’d like more examples or diagrams, or want API samples in Postman, let us know and we can add them!
-
-- Expand watchdog to auto-finish and archive stuck races and to log drift metrics.
-- Add status endpoints:
-  - GET `/race/status` → phase, race id, start/end times, checksum.
-  - GET `/race/current` → minimal snapshot metadata for clients.
-- Unit/integration tests:
-  - Determinism of ticks with fixed seeds.
-  - State machine transitions.
-  - Watchdog drift and recovery behavior.
-  - WebSocket catch-up windows.
-
-## Run
-
-- Dev (Mac):
-  - `npm install`
-  - `npm run dev` (requires Node >= 18)
-- Build:
-  - `npm run build`
-  - `npm start`
-
-## WebSocket Protocol (draft)
-
-- `race:info` → sent on connect with current race metadata and snapshot window.
-- `race:start` → at start time with horse list and config.
-- `race:tick` → streamed positions; 50ms cadence, may skip ahead if behind.
-- `race:finish` → winner, placements, finish times.
-- `sync:request` → client asks for N recent ticks; server enforces `MAX_CATCHUP_TICKS` and `SYNC_COOLDOWN_MS`.
-- `sync:ack` → server responds with ticks, current index, checksum.
-
-## Observability
-
-- Structured logs via `src/utils/logEvent.ts`.
-- Key events: precompute summary, scheduler transitions, stream ticks, skips, finish, archive, cleanup, recovery, watchdog warnings.
-
-## Motion & Units
-
-- **Distance:** meters. `trackLength` and per-tick positions are measured in meters.
-- **Speed:** meters/second. `baseSpeed` and derived speed curves are in m/s.
-- **Variance:** meters/second. `accelVariance` is a shaping amplitude for curve generation, not per-tick acceleration.
-- **Tick Duration (`dtMs`):** milliseconds per tick (e.g., 50ms → 20 ticks/sec). Total ticks = floor(`durationMs`/`dtMs`) + 1.
-- **Finish Clamp:** Crossing is interpolated within the tick window and positions are deterministically clamped to `finishLine`.
-- **Stun Semantics:** Movement halts while `isStunned` is true; the `speed` field remains the base-path speed (for UI/telemetry). Instantaneous offsets (e.g., `hook_shot`, `rocket_boost`) apply at their start tick.
-
-### Predictability & Auditing
-
-- Single seeded RNG drives all precompute; no runtime randomness.
-- Canonical `finalHorseStateMatrix` (effects applied) is the single source for visuals, winner, checksums, and persistence.
-- Validation logs: unit summary and warnings for any stun-motion anomalies; hard invariants throw if positions exceed `[0, finishLine]`.
-
-### Duration Stability
-
-- `durationMs` and `dtMs` define the tick count deterministically; streaming uses matrix index by `elapsedMs / dtMs`.
-- Base speed ranges are chosen to finish ~track length within `durationMs`; effects adjust motion deterministically without changing timing model.
+Some test environments block local port binding used by Supertest. In that case,
+run tests outside the sandbox or with local listen permissions.

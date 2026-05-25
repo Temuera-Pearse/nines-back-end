@@ -28,6 +28,7 @@ describeIfDb('raceReadService integration', () => {
 
   beforeAll(async () => {
     process.env.DATABASE_URL = testDatabaseUrl
+    process.env.NINES_RACE_DATA_PERSISTENCE_ENABLED = 'true'
     await verifyPool()
     await applyMigrations()
   })
@@ -43,6 +44,7 @@ describeIfDb('raceReadService integration', () => {
   afterAll(async () => {
     await closePool()
     delete process.env.DATABASE_URL
+    delete process.env.NINES_RACE_DATA_PERSISTENCE_ENABLED
   })
 
   it('reads current and archived races from Postgres and loads artifact fallbacks from disk', async () => {

@@ -7,6 +7,7 @@ import type { PrecomputedRace, RaceFinishPayload } from '../race/raceTypes.js'
 import type { FinalHorseStateMatrix } from '../race/events/effects.js'
 import type { EventTimeline, EventInstance } from '../race/events/timeline.js'
 import type { WinnerResult } from '../race/winner.js'
+import { isRaceDataPersistenceEnabled } from './raceDataPersistencePolicy.js'
 // Optional S3 client (loaded only when configured)
 let S3ClientRef: any = null
 let PutObjectCommandRef: any = null
@@ -61,6 +62,52 @@ export type SaveRaceResult = Readonly<{
 export interface RacePersistence {
   saveRace(raceId: string, data: RaceData): Promise<SaveRaceResult>
   markUnsaved(raceId: string): void
+}
+
+export class NoopRacePersistence implements RacePersistence {
+  async saveRace(_raceId: string, data: RaceData): Promise<SaveRaceResult> {
+    return {
+      persistenceStatus: 'unsaved',
+      artifacts: [],
+      hasPrecomputedPaths: false,
+      hasTickStream: false,
+      eventsCount: countEventTimeline(data.eventTimeline),
+    }
+  }
+
+  markUnsaved(_raceId: string): void {
+    // Persistence disabled deliberately writes no UNSAVED marker files.
+  }
+}
+
+class PolicyControlledRacePersistence implements RacePersistence {
+  private delegate: RacePersistence | null = null
+  private delegateKey: string | null = null
+  private readonly noop = new NoopRacePersistence()
+
+  async saveRace(raceId: string, data: RaceData): Promise<SaveRaceResult> {
+    if (!isRaceDataPersistenceEnabled()) {
+      return this.noop.saveRace(raceId, data)
+    }
+    return this.getDelegate().saveRace(raceId, data)
+  }
+
+  markUnsaved(raceId: string): void {
+    if (!isRaceDataPersistenceEnabled()) {
+      this.noop.markUnsaved(raceId)
+      return
+    }
+    this.getDelegate().markUnsaved(raceId)
+  }
+
+  private getDelegate(): RacePersistence {
+    const key = delegateKey()
+    if (!this.delegate || this.delegateKey !== key) {
+      this.delegate = createConfiguredRacePersistence()
+      this.delegateKey = key
+    }
+    return this.delegate
+  }
 }
 
 /**
@@ -371,6 +418,15 @@ export class S3RacePersistence implements RacePersistence {
 }
 
 export function getRacePersistence(): RacePersistence {
+  if (!sharedRacePersistence) {
+    sharedRacePersistence = new PolicyControlledRacePersistence()
+  }
+  return sharedRacePersistence
+}
+
+let sharedRacePersistence: RacePersistence | null = null
+
+function createConfiguredRacePersistence(): RacePersistence {
   const bucket = process.env.PERSIST_S3_BUCKET
   if (bucket) {
     const prefix = process.env.PERSIST_S3_PREFIX || 'races'
@@ -385,6 +441,14 @@ export function getRacePersistence(): RacePersistence {
     }
   }
   return new FileRacePersistence()
+}
+
+function delegateKey(): string {
+  return JSON.stringify({
+    bucket: process.env.PERSIST_S3_BUCKET ?? '',
+    prefix: process.env.PERSIST_S3_PREFIX ?? '',
+    dir: process.env.RACE_DATA_DIR ?? '',
+  })
 }
 
 // ---------- Helpers ----------

@@ -4,6 +4,7 @@ import { streamPrecomputedTickAt } from './raceEngine.js'
 import { RaceState } from './raceState.js'
 import { logEvent } from '../utils/logEvent.js'
 import { engineMetrics } from '../metrics/engineMetrics.js'
+import { recordEngineError } from '../observability/raceAuthoritySignals.js'
 
 // Timing constants (20Hz loop)
 export const TICK_RATE = 20
@@ -64,6 +65,7 @@ function loop() {
       // Stream by authoritative tick index
       streamPrecomputedTickAt(tickCount)
     } catch (e: any) {
+      recordEngineError(e)
       logEvent('engine:stream-error', { error: e?.message ?? String(e) })
     }
   }
@@ -132,4 +134,27 @@ export function reset(): void {
 
 export function isRunning(): boolean {
   return running
+}
+
+export function getEngineLoopSnapshot(): {
+  running: boolean
+  tickCount: number
+  lastTickTimeIso: string | null
+  nextTickTimeIso: string | null
+  targetIntervalMs: number
+} {
+  const nowWall = Date.now()
+  const nowPerf = performance.now()
+  const toIso = (perfTimestamp: number | null) =>
+    perfTimestamp === null
+      ? null
+      : new Date(nowWall - (nowPerf - perfTimestamp)).toISOString()
+
+  return {
+    running,
+    tickCount,
+    lastTickTimeIso: toIso(lastTickTime),
+    nextTickTimeIso: toIso(nextTickTime),
+    targetIntervalMs: TICK_INTERVAL,
+  }
 }

@@ -7,6 +7,7 @@ import type {
   RaceRecord,
   UpsertSeededRaceInput,
 } from './types.js'
+import { isRaceDataPersistenceEnabled } from '../persistence/raceDataPersistencePolicy.js'
 
 type RaceRow = QueryResultRow & {
   race_id: string
@@ -70,6 +71,7 @@ export interface RaceRepository {
 
 export class PgRaceRepository implements RaceRepository {
   async upsertSeededRace(input: UpsertSeededRaceInput): Promise<void> {
+    if (!isRaceDataPersistenceEnabled()) return
     const pool = getOptionalPool()
     if (!pool) return
 
@@ -108,6 +110,7 @@ export class PgRaceRepository implements RaceRepository {
   }
 
   async markRaceStarted(raceId: string, actualStartTime: Date): Promise<void> {
+    if (!isRaceDataPersistenceEnabled()) return
     const pool = getOptionalPool()
     if (!pool) return
 
@@ -124,6 +127,7 @@ export class PgRaceRepository implements RaceRepository {
   }
 
   async markRaceFinished(input: MarkRaceFinishedInput): Promise<void> {
+    if (!isRaceDataPersistenceEnabled()) return
     const pool = getOptionalPool()
     if (!pool) return
 
@@ -162,6 +166,7 @@ export class PgRaceRepository implements RaceRepository {
   }
 
   async markRaceArchived(raceId: string): Promise<void> {
+    if (!isRaceDataPersistenceEnabled()) return
     const pool = getOptionalPool()
     if (!pool) return
 
@@ -180,6 +185,7 @@ export class PgRaceRepository implements RaceRepository {
     raceId: string,
     status: RacePersistenceStatus,
   ): Promise<void> {
+    if (!isRaceDataPersistenceEnabled()) return
     const pool = getOptionalPool()
     if (!pool) return
 
@@ -195,6 +201,7 @@ export class PgRaceRepository implements RaceRepository {
   }
 
   async findCurrentRace(): Promise<RaceRecord | null> {
+    if (!isRaceDataPersistenceEnabled()) return null
     const pool = getOptionalPool()
     if (!pool) return null
 
@@ -211,6 +218,7 @@ export class PgRaceRepository implements RaceRepository {
   }
 
   async findPreviousRace(): Promise<RaceRecord | null> {
+    if (!isRaceDataPersistenceEnabled()) return null
     const pool = getOptionalPool()
     if (!pool) return null
 
@@ -227,6 +235,7 @@ export class PgRaceRepository implements RaceRepository {
   }
 
   async listRaceHistory(limit: number): Promise<RaceRecord[]> {
+    if (!isRaceDataPersistenceEnabled()) return []
     const pool = getOptionalPool()
     if (!pool) return []
 
@@ -244,6 +253,7 @@ export class PgRaceRepository implements RaceRepository {
   }
 
   async findRaceById(raceId: string): Promise<RaceRecord | null> {
+    if (!isRaceDataPersistenceEnabled()) return null
     const pool = getOptionalPool()
     if (!pool) return null
 

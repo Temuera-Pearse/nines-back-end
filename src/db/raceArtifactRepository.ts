@@ -6,6 +6,7 @@ import type {
   StorageProvider,
   UpsertRaceArtifactInput,
 } from './types.js'
+import { isRaceDataPersistenceEnabled } from '../persistence/raceDataPersistencePolicy.js'
 
 type RaceArtifactRow = QueryResultRow & {
   id: number
@@ -47,6 +48,7 @@ export interface RaceArtifactRepository {
 
 export class PgRaceArtifactRepository implements RaceArtifactRepository {
   async upsertArtifacts(artifacts: UpsertRaceArtifactInput[]): Promise<void> {
+    if (!isRaceDataPersistenceEnabled()) return
     const pool = getOptionalPool()
     if (!pool || artifacts.length === 0) return
 
@@ -87,6 +89,7 @@ export class PgRaceArtifactRepository implements RaceArtifactRepository {
     raceId: string,
     artifactType: ArtifactType,
   ): Promise<RaceArtifactRecord | null> {
+    if (!isRaceDataPersistenceEnabled()) return null
     const pool = getOptionalPool()
     if (!pool) return null
 
@@ -103,6 +106,7 @@ export class PgRaceArtifactRepository implements RaceArtifactRepository {
   }
 
   async findArtifactsByRaceId(raceId: string): Promise<RaceArtifactRecord[]> {
+    if (!isRaceDataPersistenceEnabled()) return []
     const pool = getOptionalPool()
     if (!pool) return []
 

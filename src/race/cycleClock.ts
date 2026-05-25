@@ -7,6 +7,10 @@ import {
 } from './engineLoop.js'
 import { getLeaderRole } from '../leader/elector.js'
 import { logEvent } from '../utils/logEvent.js'
+import {
+  recordEngineError,
+  recordLifecycleTickDrift,
+} from '../observability/raceAuthoritySignals.js'
 
 let running = false
 let unsubscribe: null | (() => void) = null
@@ -43,6 +47,7 @@ function scheduleNextAlignedTick(fn: () => void): void {
     try {
       fn()
     } catch (e: any) {
+      recordEngineError(e)
       logEvent('cycle:tick-error', {
         error: e?.message ?? String(e),
       })
@@ -73,8 +78,11 @@ export function startCycleClock(): void {
     }
     reconcileEngine(sm.state)
     try {
+      const drift = Date.now() % 1000
+      recordLifecycleTickDrift(Math.min(drift, 1000 - drift))
       sm.tick()
     } catch (e: any) {
+      recordEngineError(e)
       logEvent('cycle:tick-error', {
         phase: sm.state,
         error: e?.message ?? String(e),

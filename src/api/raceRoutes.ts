@@ -46,21 +46,66 @@ function sanitizeRaceConfig(config: unknown) {
   return rest
 }
 
-function isSensitivePreBetArtifact(raceId: string): boolean {
-  const current = RaceState.getPrecomputedRace()
-  if (!current || current.id !== raceId) return false
-  const { phase } = RaceState.getStateMachine().getPhaseAndSecond()
-  return phase === 'idle' || phase === 'countdown'
+function publicRaceSummary(race: {
+  id?: string
+  raceId?: string
+  config?: unknown
+  finishLine?: unknown
+  startTime?: unknown
+  endTime?: unknown
+  winnerId?: unknown
+  finishOrder?: unknown
+  finishTimesMs?: unknown
+  checksum?: unknown
+  lifecycleStatus?: unknown
+  persistenceStatus?: unknown
+}) {
+  const raceId = race.raceId ?? race.id
+  const isComplete = Boolean(race.endTime) || Boolean(race.winnerId)
+  const summary: Record<string, unknown> = {
+    raceId,
+  }
+
+  if (race.config !== undefined) summary.config = sanitizeRaceConfig(race.config)
+  if (race.finishLine !== undefined) summary.finishLine = race.finishLine
+  if (race.startTime !== undefined) summary.startTime = race.startTime
+  if (race.endTime !== undefined) summary.endTime = race.endTime
+  if (race.lifecycleStatus !== undefined) {
+    summary.lifecycleStatus = race.lifecycleStatus
+  }
+  if (race.persistenceStatus !== undefined) {
+    summary.persistenceStatus = race.persistenceStatus
+  }
+
+  if (isComplete) {
+    summary.winnerId = race.winnerId
+    summary.finishOrder = Array.isArray(race.finishOrder) ? race.finishOrder : []
+    summary.finishTimesMs =
+      race.finishTimesMs && typeof race.finishTimesMs === 'object'
+        ? race.finishTimesMs
+        : {}
+    if (race.checksum !== undefined) summary.checksum = race.checksum
+  }
+
+  return summary
 }
 
-function rejectIfSensitivePreBetArtifact(
+function isPublicArtifactAvailable(raceId: string): boolean {
+  const current = RaceState.getPrecomputedRace()
+  if (!current || current.id !== raceId) return true
+  if (current.endTime || current.authoritativeFinish) return true
+  const { phase } = RaceState.getStateMachine().getPhaseAndSecond()
+  return phase === 'race_finished' || phase === 'results_showing'
+}
+
+function rejectIfArtifactUnavailable(
   raceId: string,
   res: Response,
 ): boolean {
-  if (!isSensitivePreBetArtifact(raceId)) return false
+  if (isPublicArtifactAvailable(raceId)) return false
   res
     .status(403)
-    .json({ error: 'race artifact unavailable until betting closes' })
+    .json({ error: 'race artifact unavailable until race completion' })
   return true
 }
 
@@ -92,9 +137,9 @@ router.get('/current', requireApiToken, async (req, res) => {
  */
 router.get('/previous', requireApiToken, async (req, res) => {
   const race = RaceState.getPreviousRace()
-  if (race) return res.json(race)
+  if (race) return res.json(publicRaceSummary(race))
   const fallback = await raceReadService.getPreviousRaceSummary()
-  return res.json(fallback)
+  return res.json(fallback ? publicRaceSummary(fallback) : fallback)
 })
 
 /**
@@ -102,14 +147,14 @@ router.get('/previous', requireApiToken, async (req, res) => {
  */
 router.get('/history', requireApiToken, async (req, res) => {
   const history = RaceState.getHistory() // fixed
-  if (history.length > 0) return res.json(history)
+  if (history.length > 0) return res.json(history.map(publicRaceSummary))
   const fallback = await raceReadService.getRaceHistory(20)
-  return res.json(fallback)
+  return res.json(fallback.map(publicRaceSummary))
 })
 
 router.get('/ticks/:raceId', requireApiToken, async (req, res) => {
   const { raceId } = req.params
-  if (rejectIfSensitivePreBetArtifact(raceId, res)) return
+  if (rejectIfArtifactUnavailable(raceId, res)) return
   const pre = RaceState.findPrecomputedById(raceId)
   if (pre) return res.json({ ticks: pre.ticks })
   const ticks = await raceReadService.getRawTicks(raceId)
@@ -122,7 +167,7 @@ router.get('/ticks/:raceId', requireApiToken, async (req, res) => {
  */
 router.get('/ticks-final/:raceId', requireApiToken, async (req, res) => {
   const { raceId } = req.params
-  if (rejectIfSensitivePreBetArtifact(raceId, res)) return
+  if (rejectIfArtifactUnavailable(raceId, res)) return
   const pre = RaceState.findPrecomputedById(raceId)
   if (pre?.finalHorseStateMatrix) {
     const out = pre.finalHorseStateMatrix.map((states, i) => ({
@@ -142,7 +187,7 @@ router.get('/ticks-final/:raceId', requireApiToken, async (req, res) => {
  */
 router.get('/timeline/:raceId', requireApiToken, async (req, res) => {
   const { raceId } = req.params
-  if (rejectIfSensitivePreBetArtifact(raceId, res)) return
+  if (rejectIfArtifactUnavailable(raceId, res)) return
   const pre = RaceState.findPrecomputedById(raceId)
   if (pre?.eventTimeline) {
     const out: Array<{
@@ -166,7 +211,7 @@ router.get('/timeline/:raceId', requireApiToken, async (req, res) => {
 
 router.get('/results/:raceId', requireApiToken, async (req, res) => {
   const { raceId } = req.params
-  if (rejectIfSensitivePreBetArtifact(raceId, res)) return
+  if (rejectIfArtifactUnavailable(raceId, res)) return
   const pre = RaceState.findPrecomputedById(raceId)
   if (pre?.authoritativeFinish) {
     return respondWithFinishPayload(res, pre.authoritativeFinish)

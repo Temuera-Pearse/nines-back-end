@@ -89,7 +89,7 @@ describe('raceRoutes requireApiToken', () => {
       .set('x-api-token', 'secret')
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual([{ id: 'r1' }])
+    expect(res.body).toEqual([{ raceId: 'r1' }])
   })
 
   it('accepts token via query param', async () => {
@@ -101,7 +101,7 @@ describe('raceRoutes requireApiToken', () => {
     const res = await request(makeApp()).get('/race/history?token=secret')
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual([{ id: 'r1' }])
+    expect(res.body).toEqual([{ raceId: 'r1' }])
   })
 })
 
@@ -154,7 +154,7 @@ describe('raceRoutes endpoints', () => {
     })
   })
 
-  it('GET /race/timeline/:raceId rejects the active race artifact before betting closes', async () => {
+  it('GET /race/timeline/:raceId rejects the active race artifact before race completion', async () => {
     vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue({
       id: 'race-live-1',
     } as any)
@@ -166,7 +166,7 @@ describe('raceRoutes endpoints', () => {
 
     expect(res.status).toBe(403)
     expect(res.body).toEqual({
-      error: 'race artifact unavailable until betting closes',
+      error: 'race artifact unavailable until race completion',
     })
   })
 
@@ -376,7 +376,14 @@ describe('raceRoutes endpoints', () => {
 
     const res = await request(makeApp()).get('/race/history')
     expect(res.status).toBe(200)
-    expect(res.body).toEqual([{ raceId: 'race-db-6', winnerId: 'horse-1' }])
+    expect(res.body).toEqual([
+      {
+        raceId: 'race-db-6',
+        winnerId: 'horse-1',
+        finishOrder: [],
+        finishTimesMs: {},
+      },
+    ])
   })
 
   it('GET /race/previous falls back to read service when memory is empty', async () => {
@@ -388,7 +395,12 @@ describe('raceRoutes endpoints', () => {
 
     const res = await request(makeApp()).get('/race/previous')
     expect(res.status).toBe(200)
-    expect(res.body).toEqual({ raceId: 'race-db-7', winnerId: 'horse-9' })
+    expect(res.body).toEqual({
+      raceId: 'race-db-7',
+      winnerId: 'horse-9',
+      finishOrder: [],
+      finishTimesMs: {},
+    })
   })
 
   it('GET /race/config returns public broadcast config', async () => {

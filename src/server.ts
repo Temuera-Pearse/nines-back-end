@@ -9,21 +9,22 @@ import { MasterTimeline } from './timeline/masterTimeline.js'
 import { stop as stopEngine } from './race/engineLoop.js'
 import { startCycleClock, stopCycleClock } from './race/cycleClock.js'
 import raceRoutes from './api/raceRoutes.js'
-import { engineMetrics } from './metrics/engineMetrics.js'
+import internalRaceAuthorityRoutes from './api/internalRaceAuthorityRoutes.js'
+import raceDataPersistenceAdminRoutes from './api/raceDataPersistenceAdminRoutes.js'
+import { startRaceAuthorityObservability } from './observability/raceAuthoritySummary.js'
 import {
   EVENT_CATALOG,
   validateCatalogSymmetry,
 } from './race/events/catalog.js'
 import { startEdgeSubscriber } from './broadcast/edgeSubscriber.js'
-import client from 'prom-client'
 import { startLeaderElection } from './leader/elector.js'
 import { rateLimit } from './utils/rateLimit.js'
-import { initCloudWatch, pushMetrics } from './metrics/cloudwatch.js'
 import helmet from 'helmet'
 import { closePool, verifyPool } from './db/pool.js'
-import userRoutes from './api/userRoutes.js'
-import betRoutes from './api/betRoutes.js'
-import settlementRoutes from './api/settlementRoutes.js'
+import {
+  isSimulationMode,
+  simulationModeStartupMessage,
+} from './runtime/simulationMode.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -41,62 +42,12 @@ app.use(rateLimit({ windowMs: 10000, max: 200 }))
 
 // Routes
 app.use('/race', raceRoutes)
-app.use('/users', userRoutes)
-app.use('/bets', betRoutes)
-app.use('/settlements', settlementRoutes)
-
-// Prometheus metrics
-const collectDefaultMetrics = client.collectDefaultMetrics
-collectDefaultMetrics({ prefix: 'nines_' })
-const gaugeClients = new client.Gauge({
-  name: 'nines_ws_clients',
-  help: 'Current websocket clients',
-})
-const gaugeDropped = new client.Gauge({
-  name: 'nines_ws_dropped_tick_frames',
-  help: 'Dropped tick frames due to backpressure',
-})
-const gaugeBufferedAvg = new client.Gauge({
-  name: 'nines_ws_buffered_amount_avg',
-  help: 'Average bufferedAmount over recent window',
-})
-const gaugeTickRate = new client.Gauge({
-  name: 'nines_tick_rate',
-  help: 'Tick rate (ticks/sec) recent window',
-})
-app.get('/metrics', async (_req, res) => {
-  try {
-    const m = engineMetrics.getMetrics()
-    gaugeClients.set(m.ws.clientCount)
-    gaugeDropped.set(m.ws.droppedTickFrames)
-    gaugeBufferedAvg.set(m.ws.avgBufferedAmount)
-    gaugeTickRate.set(m.tickRate)
-    // Optional CloudWatch push
-    pushMetrics([
-      { name: 'ws_clients', value: m.ws.clientCount },
-      { name: 'ws_dropped_tick_frames', value: m.ws.droppedTickFrames },
-      { name: 'ws_buffered_amount_avg', value: m.ws.avgBufferedAmount },
-      { name: 'tick_rate', value: m.tickRate },
-    ])
-    res.set('Content-Type', client.register.contentType)
-    res.end(await client.register.metrics())
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message || String(e) })
-  }
-})
+app.use('/internal/race-authority', internalRaceAuthorityRoutes)
+app.use('/admin', raceDataPersistenceAdminRoutes)
 
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'healthy', timestamp: new Date().toISOString() })
-})
-
-// Metrics snapshot
-app.get('/race/metrics', (req, res) => {
-  try {
-    res.json(engineMetrics.getMetrics())
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message ?? String(e) })
-  }
 })
 
 // Create server (HTTPS if certs configured)
@@ -133,11 +84,16 @@ if (asym.length > 0) {
   console.warn(`Event catalog asymmetry detected: ${JSON.stringify(asym)}`)
 }
 
+if (isSimulationMode()) {
+  console.warn(simulationModeStartupMessage())
+}
+
 // Crash-safe restart recovery (idempotent)
 runRestartRecovery()
 
 // Start watchdog
 startWatchdog()
+startRaceAuthorityObservability()
 
 // Start lifecycle driver (ticks RaceStateMachine; starts engine only during race_running)
 startCycleClock()
@@ -154,7 +110,6 @@ async function startServer(): Promise<void> {
     console.log(`Server running on port ${PORT}`)
     console.log(`WebSocket server ready`)
     console.log(`Engine loop started`)
-    initCloudWatch()
   })
 }
 
