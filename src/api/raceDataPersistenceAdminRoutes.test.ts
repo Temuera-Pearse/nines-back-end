@@ -22,6 +22,7 @@ beforeEach(() => {
   delete process.env.NINES_RACE_DATA_PERSISTENCE_ADMIN_TOKEN
   delete process.env.NINES_ADMIN_TOKEN
   delete process.env.NINES_INTERNAL_RACE_AUTHORITY_TOKEN
+  delete process.env.NINES_ADMIN_CORS_ORIGINS
   resetRaceDataPersistencePolicyForTests()
 })
 
@@ -67,6 +68,45 @@ describe('raceDataPersistenceAdminRoutes', () => {
     expect(res.headers['access-control-allow-headers']).toContain(
       'Authorization',
     )
+    expect(res.headers['access-control-allow-headers']).toContain('x-api-token')
+  })
+
+  it('returns race authority overview through the browser-safe admin alias', async () => {
+    process.env.NINES_SIMULATION_MODE = 'true'
+    process.env.NINES_RACE_DATA_PERSISTENCE_ENABLED = 'false'
+
+    const res = await request(makeApp())
+      .get('/admin/race/overview')
+      .set('Origin', 'http://localhost:5174')
+
+    const serialized = JSON.stringify(res.body)
+    expect(res.status).toBe(200)
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://localhost:5174',
+    )
+    expect(res.body.server.serviceName).toBe('nines-back-end')
+    expect(res.body.lifecycle).toBeTruthy()
+    expect(res.body.tickHealth).toBeTruthy()
+    expect(serialized).not.toContain('seedInt')
+    expect(serialized).not.toContain('"seed"')
+    expect(serialized).not.toContain('finalHorseStateMatrix')
+    expect(serialized).not.toContain('eventTimeline')
+    expect(serialized).not.toContain('"ticks"')
+  })
+
+  it('handles admin race overview CORS preflight for local admin dev', async () => {
+    const res = await request(makeApp())
+      .options('/admin/race/overview')
+      .set('Origin', 'http://127.0.0.1:5174')
+      .set('Access-Control-Request-Method', 'GET')
+      .set('Access-Control-Request-Headers', 'content-type,x-api-token')
+
+    expect(res.status).toBe(204)
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'http://127.0.0.1:5174',
+    )
+    expect(res.headers['access-control-allow-methods']).toContain('GET')
+    expect(res.headers['access-control-allow-headers']).toContain('x-api-token')
   })
 
   it('returns the default disabled policy', async () => {

@@ -37,6 +37,7 @@ Base URL: `http://localhost:3001`
 Mission Control uses a separate read-only race authority endpoint:
 
 - `GET /admin/health`
+- `GET /admin/race/overview`
 - `GET /internal/race-authority/summary`
 - `GET /admin/race-data-persistence`
 - `POST /admin/race-data-persistence`
@@ -49,10 +50,13 @@ send it as a bearer token. Local development may run without the token only when
 the route is explicitly env-enabled.
 
 `GET /admin/health` is a lightweight admin-compatible alias for `/health`. It
-does not require Postgres, persistence, or race artifact access. Local admin
-browser origins `http://localhost:5173` and `http://127.0.0.1:5173` are allowed
-for this endpoint by default. Add additional comma-separated origins with
-`NINES_ADMIN_CORS_ORIGINS`.
+does not require Postgres, persistence, or race artifact access.
+`GET /admin/race/overview` exposes the same sanitized race-authority read model
+as the internal summary endpoint through a browser-safe admin path. Local admin
+browser origins `http://localhost:5173`, `http://127.0.0.1:5173`,
+`http://localhost:5174`, and `http://127.0.0.1:5174` are allowed for these
+read-only admin endpoints by default. Add additional comma-separated origins
+with `NINES_ADMIN_CORS_ORIGINS`.
 
 The race data persistence admin routes are read/write operational controls. In
 production, configure `NINES_RACE_DATA_PERSISTENCE_ADMIN_TOKEN`,

@@ -4,6 +4,7 @@ import {
   getRaceDataPersistencePolicy,
   setRaceDataPersistenceEnabled,
 } from '../persistence/raceDataPersistencePolicy.js'
+import { getRaceAuthoritySummary } from '../observability/raceAuthoritySummary.js'
 
 function bearerToken(req: Request): string | null {
   const header = req.headers.authorization
@@ -22,7 +23,7 @@ function expectedAdminToken(): string {
   )
 }
 
-function allowedAdminHealthOrigins(): Set<string> {
+function allowedAdminReadOrigins(): Set<string> {
   const configured = (process.env.NINES_ADMIN_CORS_ORIGINS ?? '')
     .split(',')
     .map((origin) => origin.trim())
@@ -31,21 +32,23 @@ function allowedAdminHealthOrigins(): Set<string> {
   return new Set([
     'http://localhost:5173',
     'http://127.0.0.1:5173',
+    'http://localhost:5174',
+    'http://127.0.0.1:5174',
     ...configured,
   ])
 }
 
-function setAdminHealthCors(req: Request, res: Response): void {
+function setAdminReadCors(req: Request, res: Response): void {
   const origin = req.headers.origin
   if (typeof origin !== 'string') return
-  if (!allowedAdminHealthOrigins().has(origin)) return
+  if (!allowedAdminReadOrigins().has(origin)) return
 
   res.setHeader('Vary', 'Origin')
   res.setHeader('Access-Control-Allow-Origin', origin)
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS')
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Accept, Authorization, Content-Type, x-admin-token',
+    'Accept, Authorization, Content-Type, x-api-token, x-admin-token',
   )
   res.setHeader('Access-Control-Max-Age', '600')
 }
@@ -68,17 +71,35 @@ function requireAdminAccess(req: Request, res: Response, next: NextFunction) {
 const router = Router()
 
 router.options('/health', (req, res) => {
-  setAdminHealthCors(req, res)
+  setAdminReadCors(req, res)
   res.status(204).send()
 })
 
 router.get('/health', (req, res) => {
-  setAdminHealthCors(req, res)
+  setAdminReadCors(req, res)
   res.json({
     status: 'healthy',
     service: 'nines-back-end',
     timestamp: new Date().toISOString(),
   })
+})
+
+router.options('/race/overview', (req, res) => {
+  setAdminReadCors(req, res)
+  res.status(204).send()
+})
+
+router.get('/race/overview', async (req, res) => {
+  setAdminReadCors(req, res)
+  try {
+    res.json(await getRaceAuthoritySummary())
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    res.status(500).json({
+      error: 'race authority overview unavailable',
+      message,
+    })
+  }
 })
 
 router.get('/race-data-persistence', requireAdminAccess, (_req, res) => {

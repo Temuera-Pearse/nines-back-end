@@ -49,6 +49,17 @@ describe('internalRaceAuthorityRoutes', () => {
     expect(authorized.body.server.serviceName).toBe('nines-back-end')
   })
 
+  it('requires an internal token in production even when explicitly enabled', async () => {
+    process.env.NODE_ENV = 'production'
+    process.env.NINES_ENABLE_INTERNAL_RACE_AUTHORITY = '1'
+    delete process.env.NINES_INTERNAL_RACE_AUTHORITY_TOKEN
+
+    const res = await request(makeApp()).get('/internal/race-authority/summary')
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({ error: 'internal token required' })
+  })
+
   it('returns a safe summary without deterministic outcome fields', async () => {
     process.env.NINES_ENABLE_INTERNAL_RACE_AUTHORITY = '1'
 
