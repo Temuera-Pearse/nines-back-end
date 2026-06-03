@@ -33,7 +33,10 @@ import { getRacePersistence } from '../persistence/racePersistence.js'
 import { getRaceRepository } from '../db/raceRepository.js'
 import { getRaceArtifactRepository } from '../db/raceArtifactRepository.js'
 import { getRaceArtifactStoragePolicy } from '../observability/raceAuthorityStoragePolicy.js'
-import { recordArtifactWrite } from '../observability/raceAuthoritySignals.js'
+import {
+  clearEngineError,
+  recordArtifactWrite,
+} from '../observability/raceAuthoritySignals.js'
 
 // Easing helpers for smooth curves
 const easeInQuad = (t: number) => t * t
@@ -661,6 +664,7 @@ export function seedPrecomputedRace(): PrecomputedRace {
   precomputed = seededRace.precomputed
   const raceId = precomputed.id
   lastStreamedIndex = null
+  clearEngineError()
 
   try {
     const catchupTicks = (precomputed.finalHorseStateMatrix ?? []).map(
@@ -856,6 +860,7 @@ export function startPrecomputedRace(startTime = new Date()): PrecomputedRace {
     precomputed = seedPrecomputedRace()
   }
   precomputed.startTime = startTime
+  clearEngineError()
   // Transition into running
   sm.transition('race_running')
 

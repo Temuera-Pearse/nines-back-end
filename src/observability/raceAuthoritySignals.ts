@@ -104,6 +104,10 @@ export function recordEngineError(error: unknown): void {
   }
 }
 
+export function clearEngineError(): void {
+  signals.lastEngineError = null
+}
+
 export function recordWatchdogWarning(message: string, raceId?: string): void {
   signals.lastWatchdogWarning = {
     message,

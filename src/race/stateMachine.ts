@@ -59,6 +59,17 @@ function nextSeedString(cycleId: number): string {
   return `cycle-${cycleId}-${nonce}`
 }
 
+function ensurePrecomputedRace(): void {
+  const existing = RaceState.getPrecomputedRace()
+  if (existing) return
+
+  const cycleId = RaceState.bumpCycle()
+  const seedStr = nextSeedString(cycleId)
+  RaceState.setCurrentSeed(seedStr)
+  const seeded = seedPrecomputedRace()
+  RaceState.setPrecomputedRace(seeded)
+}
+
 export class RaceStateMachine {
   state: RacePhase = 'idle'
   // currentSecond is always snapped to the actual UTC second — no accumulated drift.
@@ -130,11 +141,7 @@ export class RaceStateMachine {
           }
         }
 
-        const cycleId = RaceState.bumpCycle()
-        const seedStr = nextSeedString(cycleId)
-        RaceState.setCurrentSeed(seedStr)
-        const seeded = seedPrecomputedRace()
-        RaceState.setPrecomputedRace(seeded)
+        ensurePrecomputedRace()
       }
 
       if (this.state !== 'idle' && this.currentSecond <= SECS.idleEnd) {
@@ -147,16 +154,7 @@ export class RaceStateMachine {
       }
     } else if (this.inRange(SECS.countdownStart, SECS.countdownEnd)) {
       // Safety: if booted mid-cycle and no precomputed race exists yet, seed now.
-      if (this.currentSecond === SECS.countdownStart) {
-        const existing = RaceState.getPrecomputedRace()
-        if (!existing) {
-          const cycleId = RaceState.bumpCycle()
-          const seedStr = nextSeedString(cycleId)
-          RaceState.setCurrentSeed(seedStr)
-          const seeded = seedPrecomputedRace()
-          RaceState.setPrecomputedRace(seeded)
-        }
-      }
+      ensurePrecomputedRace()
       if (this.state !== 'countdown') this.transition('countdown')
       // Countdown emits 3→2→1 for front-end convenience
       const tMinus = SECS.raceStart - this.currentSecond
@@ -175,6 +173,7 @@ export class RaceStateMachine {
         this.currentSecond === SECS.raceStart &&
         this.state === 'race_starting'
       ) {
+        ensurePrecomputedRace()
         startPrecomputedRace()
       }
       // Enter race_running right after race_starting boundary
