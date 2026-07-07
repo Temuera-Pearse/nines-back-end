@@ -390,14 +390,14 @@ describe('raceRoutes endpoints', () => {
     vi.spyOn(RaceState, 'getPreviousRace').mockReturnValue(null)
     raceReadServiceMock.getPreviousRaceSummary.mockResolvedValue({
       raceId: 'race-db-7',
-      winnerId: 'horse-9',
+      winnerId: 'horse-8',
     })
 
     const res = await request(makeApp()).get('/race/previous')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
       raceId: 'race-db-7',
-      winnerId: 'horse-9',
+      winnerId: 'horse-8',
       finishOrder: [],
       finishTimesMs: {},
     })

@@ -29,6 +29,7 @@ import {
 } from './events/effects.js'
 import { determineWinner } from './winner.js'
 import type { WinnerResult } from './winner.js'
+import { getHorseId, HORSE_COUNT } from './raceConstants.js'
 import { getRacePersistence } from '../persistence/racePersistence.js'
 import { getRaceRepository } from '../db/raceRepository.js'
 import { getRaceArtifactRepository } from '../db/raceArtifactRepository.js'
@@ -417,7 +418,7 @@ function generateHorseSeeds(numHorses: number, rng: () => number): HorseSeed[] {
     const accelVariance = 6 + rng() * 6 // 6–12 u/s as shaping amplitude
     const rngSeed = (rng() * 0x100000000) >>> 0
     horses.push({
-      id: `horse-${i}`,
+      id: getHorseId(i),
       name: `Horse ${i + 1}`,
       baseSpeed,
       accelVariance,
@@ -735,7 +736,7 @@ function buildSeededRace(seedStr: string, seedInt: number): SeededRaceBuild {
   // Single RNG instance for entire race
   const rng = makeMulberry32(seedInt)
 
-  const horses = generateHorseSeeds(10, rng)
+  const horses = generateHorseSeeds(HORSE_COUNT, rng)
   const t0 = performance.now()
   const { ticks, finishOrder, finishTimesMs, winnerId, finishTickIndex } =
     generateRaceTicks(horses, config, rng)
@@ -956,7 +957,7 @@ function broadcastTickSafe(
   if (_posBuffer.length !== n) _posBuffer.length = n
   // Seed with each horse's last known position as fallback
   for (let i = 0; i < n; i++) _posBuffer[i] = horses[i].position
-  // Overwrite with incoming state (O(n²) but n=10, cheaper than Map creation)
+  // Overwrite with incoming state (O(n²), cheaper than Map creation for this small field)
   for (const s of updates) {
     for (let i = 0; i < n; i++) {
       if (horses[i].id === s.horseId) {
@@ -1402,7 +1403,7 @@ export function streamPrecomputedTickAt(tickIndex: number): PositionUpdate[] {
     (precomputed.finalHorseStateMatrix?.length ?? precomputed.ticks.length) - 1
   if (isLast && currentRace.isActive) {
     currentRace.isActive = false
-    // Use canonical (event-modified) finish order so ALL 10 horses are ranked —
+    // Use canonical (event-modified) finish order so the whole field is ranked —
     // finishers by crossing time, non-finishers by final distance.
     // This matches what deriveCanonicalFinishOrder produces in streamPrecomputedTicks.
     const canonicalOrder = deriveCanonicalFinishOrder(precomputed)

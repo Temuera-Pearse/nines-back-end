@@ -11,6 +11,7 @@ import { startCycleClock, stopCycleClock } from './race/cycleClock.js'
 import raceRoutes from './api/raceRoutes.js'
 import internalRaceAuthorityRoutes from './api/internalRaceAuthorityRoutes.js'
 import raceDataPersistenceAdminRoutes from './api/raceDataPersistenceAdminRoutes.js'
+import { createPublicCorsMiddleware } from './api/publicCors.js'
 import { startRaceAuthorityObservability } from './observability/raceAuthoritySummary.js'
 import {
   EVENT_CATALOG,
@@ -37,6 +38,7 @@ app.use(
     contentSecurityPolicy: false,
   }),
 )
+app.use(createPublicCorsMiddleware())
 // Basic API rate limit (optional)
 app.use(rateLimit({ windowMs: 10000, max: 200 }))
 
