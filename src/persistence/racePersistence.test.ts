@@ -1,4 +1,4 @@
-import { rm, stat } from 'fs/promises'
+import { readFile, rm, stat } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -32,7 +32,7 @@ function dataDir(prefix: string): string {
 function raceData(raceId: string) {
   return {
     raceId,
-    seed: 'private-seed',
+    privateSeed: 'private-seed',
     authoritativeFinish: {
       raceId,
       timestampUtc: '2026-05-21T00:00:00.000Z',
@@ -47,7 +47,18 @@ function raceData(raceId: string) {
     },
     precomputedPaths: [[{ horseId: 'horse-1', position: 1 }]],
     tickStream: [{ timestampOffsetMs: 0, positions: [] }],
-    eventTimeline: new Map([[0, [{ id: 'boost', instanceId: 'event-1' } as any]]]),
+    eventTimeline: new Map([
+      [
+        0,
+        [
+          {
+            id: 'boost',
+            instanceId: 'event-1',
+            effectKey: 'private-effect-key',
+          } as any,
+        ],
+      ],
+    ]),
     outcome: {
       winnerId: 'horse-1',
       finishOrder: ['horse-1'],
@@ -63,7 +74,6 @@ function raceData(raceId: string) {
       finishRatio: 0.9,
       durationMs: 20000,
       dtMs: 50,
-      seed: 'private-seed',
     },
     checksum: 'checksum',
   }
@@ -129,6 +139,15 @@ describe('race data persistence policy', () => {
       expect(await pathExists(join(raceDir, 'eventTimeline.json'))).toBe(true)
       expect(await pathExists(join(raceDir, 'precomputedPaths.json'))).toBe(true)
       expect(await pathExists(join(raceDir, 'ticks.json'))).toBe(true)
+      const summary = JSON.parse(
+        await readFile(join(raceDir, 'summary.json'), 'utf8'),
+      )
+      expect(summary.privateSeed).toBe('private-seed')
+      expect(summary.seed).toBeUndefined()
+      expect(summary.config.seed).toBeUndefined()
+      expect(
+        await readFile(join(raceDir, 'eventTimeline.json'), 'utf8'),
+      ).not.toContain('private-effect-key')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

@@ -38,6 +38,7 @@ import {
   clearEngineError,
   recordArtifactWrite,
 } from '../observability/raceAuthoritySignals.js'
+import { createOpaqueRaceId, type RaceIdFactory } from './raceId.js'
 
 // Easing helpers for smooth curves
 const easeInQuad = (t: number) => t * t
@@ -116,6 +117,12 @@ function buildAuthoritativeFinishPayload(
 function sanitizeRaceConfig(config: RaceConfig): Omit<RaceConfig, 'seed'> {
   const { seed: _seed, ...publicConfig } = config
   return publicConfig
+}
+
+function privateSeedFreeConfig(
+  config: RaceConfig,
+): Record<string, unknown> {
+  return sanitizeRaceConfig(config) as unknown as Record<string, unknown>
 }
 
 function buildWinnerDeclaredPayload(
@@ -214,7 +221,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
           winnerId: pre.winnerId,
           finishOrder: [...pre.finishOrder],
           finishTimesMs: { ...pre.finishTimesMs },
-          config: pre.config as unknown as Record<string, unknown>,
+          config: privateSeedFreeConfig(pre.config),
           hasTickStream: false,
           hasPrecomputedPaths: false,
           eventsCount: 0,
@@ -241,13 +248,13 @@ function persistCompletedRace(pre: PrecomputedRace): void {
     })
     const data = {
       raceId: pre.id,
-      seed: pre.config.seed,
+      privateSeed: pre.config.seed,
       authoritativeFinish,
       precomputedPaths: pre.finalHorseStateMatrix,
       eventTimeline: pre.eventTimeline,
       outcome,
       winner,
-      config: pre.config,
+      config: sanitizeRaceConfig(pre.config),
       checksum: pre.checksum,
     }
 
@@ -277,7 +284,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
           winnerId: pre.winnerId,
           finishOrder: [...pre.finishOrder],
           finishTimesMs: { ...pre.finishTimesMs },
-          config: pre.config as unknown as Record<string, unknown>,
+          config: privateSeedFreeConfig(pre.config),
           hasTickStream: false,
           hasPrecomputedPaths: false,
           eventsCount,
@@ -318,7 +325,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
           winnerId: pre.winnerId,
           finishOrder: [...pre.finishOrder],
           finishTimesMs: { ...pre.finishTimesMs },
-          config: pre.config as unknown as Record<string, unknown>,
+          config: privateSeedFreeConfig(pre.config),
           hasTickStream: result.hasTickStream,
           hasPrecomputedPaths: result.hasPrecomputedPaths,
           eventsCount: result.eventsCount,
@@ -358,7 +365,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
           winnerId: pre.winnerId,
           finishOrder: [...pre.finishOrder],
           finishTimesMs: { ...pre.finishTimesMs },
-          config: pre.config as unknown as Record<string, unknown>,
+          config: privateSeedFreeConfig(pre.config),
           hasTickStream: false,
           hasPrecomputedPaths: false,
           eventsCount: 0,
@@ -498,6 +505,7 @@ export function generateRaceTicks(
   horses: HorseSeed[],
   config: RaceConfig,
   rng: () => number,
+  publicRaceId = 'race-pending',
 ): {
   ticks: PrecomputedTick[]
   finishOrder: string[]
@@ -506,7 +514,7 @@ export function generateRaceTicks(
   // New: exact crossing tick index per horse
   finishTickIndex: Record<string, number>
 } {
-  const raceId = config.seed
+  const raceId = publicRaceId
   const finishLine = config.trackLength * config.finishRatio
   const totalFrames = Math.floor(config.durationMs / config.dtMs)
   const dtSec = config.dtMs / 1000
@@ -536,7 +544,7 @@ export function generateRaceTicks(
   log(
     `[${ts()}][TICKS][${raceId}] Precomputing ${
       totalFrames + 1
-    } ticks with seed=${config.seed}`,
+    } ticks`,
   )
   if (VERBOSE) {
     horses.forEach((h) =>
@@ -629,11 +637,17 @@ export function generateRaceTicks(
  * Create and store a precomputed race shortly before the scheduled start.
  * Uses the single RNG created from the current seed stored in RaceState.
  */
-export function seedPrecomputedRace(): PrecomputedRace {
+export function seedPrecomputedRace(
+  raceIdFactory: RaceIdFactory = createOpaqueRaceId,
+): PrecomputedRace {
   const baseSeedStr = RaceState.getCurrentSeed()
   if (!baseSeedStr) {
     throw new Error('Active cycle seed not set')
   }
+
+  // Allocate once, before any deterministic finish retry. Internal seed changes
+  // must never change the public identity of this race.
+  const raceId = raceIdFactory()
 
   let seededRace: SeededRaceBuild | null = null
   let selectedSeedStr = baseSeedStr
@@ -642,7 +656,7 @@ export function seedPrecomputedRace(): PrecomputedRace {
     const candidateSeed =
       attempt === 0 ? baseSeedStr : `${baseSeedStr}:finish-retry-${attempt}`
     const candidateSeedInt = hashStringToInt(candidateSeed)
-    const candidate = buildSeededRace(candidateSeed, candidateSeedInt)
+    const candidate = buildSeededRace(raceId, candidateSeed, candidateSeedInt)
     if (candidate.crossingsCount > 0) {
       seededRace = candidate
       selectedSeedStr = candidateSeed
@@ -650,7 +664,9 @@ export function seedPrecomputedRace(): PrecomputedRace {
     }
 
     log(
-      `[${ts()}][RACE][retry] Seed ${candidateSeed} produced no canonical crossings; retrying`,
+      `[${ts()}][RACE][${raceId}] Deterministic attempt ${
+        attempt + 1
+      } produced no canonical crossings; retrying`,
     )
   }
 
@@ -663,7 +679,6 @@ export function seedPrecomputedRace(): PrecomputedRace {
   }
 
   precomputed = seededRace.precomputed
-  const raceId = precomputed.id
   lastStreamedIndex = null
   clearEngineError()
 
@@ -693,7 +708,6 @@ export function seedPrecomputedRace(): PrecomputedRace {
     durationMs: precomputed.config.durationMs,
     dtMs: precomputed.config.dtMs,
     winnerId: precomputed.winnerId,
-    seed: precomputed.config.seed,
   })
 
   void raceRepository
@@ -701,7 +715,7 @@ export function seedPrecomputedRace(): PrecomputedRace {
       raceId,
       seed: selectedSeedStr,
       checksum: precomputed.checksum ?? null,
-      config: precomputed.config as unknown as Record<string, unknown>,
+      config: privateSeedFreeConfig(precomputed.config),
       eventsCount: seededRace.eventsCount,
     })
     .catch((e) =>
@@ -722,9 +736,11 @@ export function seedPrecomputedRace(): PrecomputedRace {
   return precomputed
 }
 
-function buildSeededRace(seedStr: string, seedInt: number): SeededRaceBuild {
-  const raceId = `race-${seedInt.toString(16).padStart(8, '0')}`
-
+function buildSeededRace(
+  raceId: string,
+  seedStr: string,
+  seedInt: number,
+): SeededRaceBuild {
   const config: RaceConfig = {
     trackLength: TRACK_LENGTH,
     finishRatio: 1.0,
@@ -739,7 +755,7 @@ function buildSeededRace(seedStr: string, seedInt: number): SeededRaceBuild {
   const horses = generateHorseSeeds(HORSE_COUNT, rng)
   const t0 = performance.now()
   const { ticks, finishOrder, finishTimesMs, winnerId, finishTickIndex } =
-    generateRaceTicks(horses, config, rng)
+    generateRaceTicks(horses, config, rng, raceId)
   const tTicksMs = performance.now() - t0
   engineMetrics.recordPrecomputeMs(tTicksMs)
   engineMetrics.recordPrecomputePhase('ticks', tTicksMs)

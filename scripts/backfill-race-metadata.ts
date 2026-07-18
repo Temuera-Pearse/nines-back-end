@@ -6,7 +6,9 @@ import { getRaceArtifactRepository } from '../src/db/raceArtifactRepository.js'
 
 type SummaryFile = {
   raceId: string
-  seed: string
+  privateSeed?: string
+  // Legacy summaries used this less explicit field name.
+  seed?: string
   outcome?: {
     winnerId?: string
     finishOrder?: string[]
@@ -37,10 +39,14 @@ async function main(): Promise<void> {
       const raw = await fs.readFile(summaryPath, 'utf8')
       const summary = JSON.parse(raw) as SummaryFile
       const summaryStat = await fs.stat(summaryPath)
+      const privateSeed = summary.privateSeed ?? summary.seed
+      if (!privateSeed) {
+        throw new Error('Summary is missing its internal replay seed')
+      }
 
       await raceRepository.upsertSeededRace({
         raceId: summary.raceId,
-        seed: summary.seed,
+        seed: privateSeed,
         checksum: summary.checksum ?? null,
         config: summary.config ?? {},
         eventsCount: summary.eventsCount ?? 0,

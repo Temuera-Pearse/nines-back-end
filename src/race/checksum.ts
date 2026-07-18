@@ -4,14 +4,11 @@ import type { EventTimeline } from './events/timeline.js'
 
 export function computeRaceChecksum(pre: PrecomputedRace): string {
   const payload = {
-    raceId: pre.id,
-    seed: pre.config.seed,
-    horseSeeds: pre.horses.map((h) => ({
+    horses: pre.horses.map((h) => ({
       id: h.id,
       name: h.name,
       baseSpeed: h.baseSpeed,
       accelVariance: h.accelVariance,
-      rngSeed: h.rngSeed,
     })),
     // Use canonical finalHorseStateMatrix when available for checksum stability
     firstTickPositions:

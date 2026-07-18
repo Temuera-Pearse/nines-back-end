@@ -5,6 +5,8 @@ export type EventInstance = Readonly<{
   id: string
   tickIndex: number
   instanceId: string
+  /** Private deterministic key used by the effect engine; never serialize. */
+  effectKey?: string
 }>
 
 export type EventTimeline = ReadonlyMap<number, Readonly<EventInstance[]>>
@@ -364,7 +366,8 @@ export function generateEventTimeline(
     )
     if (conflict) continue
 
-    const instanceId = deterministicInstanceId(
+    const instanceId = deterministicInstanceId(c.id, c.tickIndex, c.occ)
+    const effectKey = deterministicEffectKey(
       raceSeed,
       c.id,
       c.tickIndex,
@@ -374,6 +377,7 @@ export function generateEventTimeline(
       id: c.id,
       tickIndex: c.tickIndex,
       instanceId,
+      effectKey,
     })
     atTick.push(instance)
     placed.set(c.tickIndex, atTick)
@@ -390,13 +394,25 @@ export function generateEventTimeline(
   return out as EventTimeline
 }
 
-function deterministicInstanceId(
+function deterministicEffectKey(
   seed: number,
   eventId: string,
   tickIndex: number,
   occ: number
 ): string {
   const key = `${seed}|${eventId}|${tickIndex}|${occ}`
+  const h = hashStringToInt(key) >>> 0
+  return `evt-${h.toString(16).padStart(8, '0')}`
+}
+
+function deterministicInstanceId(
+  eventId: string,
+  tickIndex: number,
+  occ: number
+): string {
+  // Public event identifiers remain deterministic within a race, but must not
+  // encode the private race seed. The raceId scopes these IDs across races.
+  const key = `${eventId}|${tickIndex}|${occ}`
   const h = hashStringToInt(key) >>> 0
   const hex = h.toString(16).padStart(8, '0')
   return `evt-${hex}`

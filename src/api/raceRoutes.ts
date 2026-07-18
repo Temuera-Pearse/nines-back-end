@@ -42,7 +42,12 @@ function respondWithFinishPayload(
 
 function sanitizeRaceConfig(config: unknown) {
   if (!config || typeof config !== 'object') return config
-  const { seed: _seed, ...rest } = config as Record<string, unknown>
+  const {
+    seed: _seed,
+    privateSeed: _privateSeed,
+    seedInt: _seedInt,
+    ...rest
+  } = config as Record<string, unknown>
   return rest
 }
 

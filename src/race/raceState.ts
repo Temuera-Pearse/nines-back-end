@@ -30,7 +30,6 @@ type RaceScheduleArgs = {
   finishLine: number
   durationMs: number
   dtMs: number
-  seed?: string
   winnerId?: string | null
 }
 
@@ -50,7 +49,7 @@ type DebugVelocityArgs = {
   tickIndex: number
   velocities: { horseId: string; velocity: number }[]
 }
-type DebugSeedArgs = { raceId: string; seed: string }
+type DebugSeedArgs = { raceId: string }
 type DebugDriftArgs = {
   raceId: string
   tickIndex: number
@@ -84,7 +83,6 @@ export const Log = {
       finishLine,
       durationMs,
       dtMs,
-      seed,
       winnerId,
     } = args
     console.log(
@@ -94,7 +92,6 @@ export const Log = {
           finishLine,
           durationMs,
           dtMs,
-          seed,
           winnerId: winnerId ?? null,
         }),
     )
@@ -167,9 +164,9 @@ export const Log = {
         ),
     )
   },
-  debugSeed({ raceId, seed }: DebugSeedArgs) {
+  debugSeed({ raceId }: DebugSeedArgs) {
     if (!isDev) return
-    console.log(`${fmt('DEBUG-SEED', raceId)} seed=${seed}`)
+    console.log(`${fmt('DEBUG-SEED', raceId)} private seed initialized`)
   },
   debugDrift({
     raceId,
@@ -231,7 +228,7 @@ export class RaceState {
     if (seed) {
       // Compute 32-bit int for RNG determinism
       this.currentSeedInt = hashStringToInt(seed)
-      Log.debugSeed({ raceId: this.precomputed?.id ?? 'pending', seed })
+      Log.debugSeed({ raceId: this.precomputed?.id ?? 'pending' })
     } else {
       this.currentSeedInt = null
     }

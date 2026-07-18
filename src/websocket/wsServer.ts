@@ -77,7 +77,12 @@ function buildWinnerDeclaredPayload(
 
 function sanitizeRaceConfig(config: unknown) {
   if (!config || typeof config !== 'object') return config
-  const { seed: _seed, ...publicConfig } = config as Record<string, unknown>
+  const {
+    seed: _seed,
+    privateSeed: _privateSeed,
+    seedInt: _seedInt,
+    ...publicConfig
+  } = config as Record<string, unknown>
   return publicConfig
 }
 

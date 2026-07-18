@@ -176,7 +176,7 @@ export interface RaceConfig {
   finishRatio: number // e.g. 0.9 for 90%
   durationMs: number // e.g. 20000
   dtMs: number // e.g. 50
-  seed: string // deterministic seed per race
+  seed: string // PRIVATE: deterministic replay seed; strip from public payloads
 }
 
 export interface PositionUpdate {

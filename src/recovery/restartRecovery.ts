@@ -36,7 +36,6 @@ export function runRestartRecovery(): void {
       RaceState.setCurrentSeed(pre.config.seed)
       logEvent('restart:seed-restored', {
         raceId: pre.id,
-        seed: pre.config.seed,
       })
     }
   } catch {

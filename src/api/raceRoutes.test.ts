@@ -116,7 +116,12 @@ describe('raceRoutes endpoints', () => {
   it('GET /race/current returns race summary', async () => {
     vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue({
       id: 'race-1',
-      config: { seed: 's', dtMs: 50 },
+      config: {
+        seed: 's',
+        privateSeed: 'defensive-private-seed',
+        seedInt: 123,
+        dtMs: 50,
+      },
       finishLine: 123,
       startTime: 1000,
       endTime: 2000,
@@ -137,7 +142,12 @@ describe('raceRoutes endpoints', () => {
     vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue(null)
     raceReadServiceMock.getCurrentRaceSummary.mockResolvedValue({
       raceId: 'race-db-1',
-      config: { seed: 'db-seed', durationMs: 20000 },
+      config: {
+        seed: 'db-seed',
+        privateSeed: 'defensive-private-db-seed',
+        seedInt: 456,
+        durationMs: 20000,
+      },
       finishLine: 1000,
       startTime: '2026-03-16T00:00:30.000Z',
       endTime: '2026-03-16T00:00:50.000Z',

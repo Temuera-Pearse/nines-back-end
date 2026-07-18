@@ -28,7 +28,8 @@ export type RaceOutcome = Readonly<{
 
 export type RaceData = Readonly<{
   raceId: string
-  seed: string
+  // Internal replay material. Artifact storage must remain access-controlled.
+  privateSeed: string
   authoritativeFinish: RaceFinishPayload
   precomputedPaths: FinalHorseStateMatrix | ReadonlyArray<unknown> // allow compacted representation
   tickStream?: ReadonlyArray<unknown> // optional, partial allowed
@@ -36,7 +37,7 @@ export type RaceData = Readonly<{
   outcome: RaceOutcome
   winner: WinnerResult
   // Optional metadata for audit
-  config?: PrecomputedRace['config']
+  config?: Omit<PrecomputedRace['config'], 'seed'>
   checksum?: string
 }>
 
@@ -133,7 +134,7 @@ export class FileRacePersistence implements RacePersistence {
     const eventsCount = countEventTimeline(data.eventTimeline)
     const summary = {
       raceId: data.raceId,
-      seed: data.seed,
+      privateSeed: data.privateSeed,
       authoritativeFinish: data.authoritativeFinish,
       outcome: data.outcome,
       winner: data.winner,
@@ -306,7 +307,7 @@ export class S3RacePersistence implements RacePersistence {
     const eventsCount = countEventTimeline(data.eventTimeline)
     const summary = {
       raceId: data.raceId,
-      seed: data.seed,
+      privateSeed: data.privateSeed,
       authoritativeFinish: data.authoritativeFinish,
       outcome: data.outcome,
       winner: data.winner,

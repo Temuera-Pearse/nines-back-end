@@ -54,9 +54,13 @@ const MULTI_TARGET_EVENT_LIMIT = new Map<string, number>([
   ['magnet_pull', 1],
 ])
 
-// Utility: deterministic single index from instanceId
+function effectKey(instance: EventInstance): string {
+  return instance.effectKey ?? instance.instanceId
+}
+
+// Utility: deterministic single index from the private effect key.
 function pickIndex(instance: EventInstance, count: number, salt = ''): number {
-  const h = hashStringToInt(`${instance.instanceId}${salt}`)
+  const h = hashStringToInt(`${effectKey(instance)}${salt}`)
   return count === 0 ? 0 : h % count
 }
 function pickTwoDistinct(
@@ -79,7 +83,7 @@ function pickHorseIds(
   return horseIds
     .map((horseId) => ({
       horseId,
-      score: hashStringToInt(`${instance.instanceId}:${salt}:${horseId}`),
+      score: hashStringToInt(`${effectKey(instance)}:${salt}:${horseId}`),
     }))
     .sort((a, b) => a.score - b.score || a.horseId.localeCompare(b.horseId))
     .slice(0, Math.max(0, limit))
@@ -161,7 +165,7 @@ export function applyEventEffects(
       const ao = catalogOrder.get(a.id) ?? Number.MAX_SAFE_INTEGER
       const bo = catalogOrder.get(b.id) ?? Number.MAX_SAFE_INTEGER
       if (ao !== bo) return ao - bo
-      return a.instanceId.localeCompare(b.instanceId)
+      return effectKey(a).localeCompare(effectKey(b))
     })
 
     const rerouteIfLucky = (targetIdx: number): number => {
