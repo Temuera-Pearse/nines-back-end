@@ -133,9 +133,9 @@ export class RaceStateMachine {
         // If something went wrong in the prior cycle and a race is still hanging around,
         // clear it first so we never repeat the exact same race over and over.
         const existing = RaceState.getPrecomputedRace()
-        if (existing?.id) {
+        if (existing?.raceId) {
           try {
-            releaseRace(existing.id)
+            releaseRace(existing.raceId)
           } catch {
             // best-effort
           }
@@ -189,8 +189,8 @@ export class RaceStateMachine {
       }
       // During race_running, emit per-second positions if available
       const pre = RaceState.getPrecomputedRace()
-      if (pre?.id) {
-        const rec = activeRaces.get(pre.id)
+      if (pre?.raceId) {
+        const rec = activeRaces.get(pre.raceId)
         if (rec) {
           const elapsed = (this.currentSecond - SECS.raceStart) * 1000 // ms since 30s
           const idx = Math.max(

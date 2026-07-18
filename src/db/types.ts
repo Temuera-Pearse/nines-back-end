@@ -17,6 +17,7 @@ export type StorageProvider = 'local_fs' | 's3'
 
 export interface RaceRecord {
   raceId: string
+  raceRef: string | null
   seed: string
   lifecycleStatus: RaceLifecycleStatus
   scheduledStartTime: Date | null
@@ -37,6 +38,7 @@ export interface RaceRecord {
 
 export interface UpsertSeededRaceInput {
   raceId: string
+  raceRef: string | null
   seed: string
   scheduledStartTime?: Date | null
   checksum?: string | null

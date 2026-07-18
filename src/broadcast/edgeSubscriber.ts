@@ -16,7 +16,10 @@ export async function startEdgeSubscriber(): Promise<void> {
       if (tickTs !== null) {
         engineMetrics.recordEdgeRebroadcast(Date.now() - tickTs)
       }
-      RaceWebSocketServer.broadcast(obj)
+      RaceWebSocketServer.broadcast(
+        obj,
+        typeof obj?.raceRef === 'string' ? obj.raceRef : undefined,
+      )
     } catch {
       // ignore
     }

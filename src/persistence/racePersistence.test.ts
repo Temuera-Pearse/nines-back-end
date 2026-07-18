@@ -30,11 +30,13 @@ function dataDir(prefix: string): string {
 }
 
 function raceData(raceId: string) {
+  const raceRef = 'N9-7K3M2-Q8D4X'
   return {
     raceId,
+    raceRef,
     privateSeed: 'private-seed',
     authoritativeFinish: {
-      raceId,
+      raceRef,
       timestampUtc: '2026-05-21T00:00:00.000Z',
       winnerId: 'horse-1',
       finishOrder: ['horse-1'],
@@ -178,10 +180,11 @@ describe('race data persistence policy', () => {
     await expect(
       raceRepository.upsertSeededRace({
         raceId: 'race-sim-db-1',
+        raceRef: 'N9-7K3M2-Q8D4X',
         seed: 'private-seed',
         config: { durationMs: 20000, dtMs: 50 },
       }),
-    ).resolves.toBeUndefined()
+    ).resolves.toBe('N9-7K3M2-Q8D4X')
     await expect(
       raceRepository.markRaceStarted('race-sim-db-1', new Date()),
     ).resolves.toBeUndefined()

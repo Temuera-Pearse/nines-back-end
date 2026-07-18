@@ -38,7 +38,13 @@ import {
   clearEngineError,
   recordArtifactWrite,
 } from '../observability/raceAuthoritySignals.js'
-import { createOpaqueRaceId, type RaceIdFactory } from './raceId.js'
+import {
+  allocateUniqueRaceRef,
+  createOpaqueRaceId,
+  createRaceRef,
+  type RaceIdFactory,
+  type RaceRefFactory,
+} from './raceId.js'
 
 // Easing helpers for smooth curves
 const easeInQuad = (t: number) => t * t
@@ -99,7 +105,7 @@ function buildAuthoritativeFinishPayload(
 ): RaceFinishPayload {
   const timestampUtc = timestamp.toISOString()
   return {
-    raceId: pre.id,
+    raceRef: pre.raceRef,
     timestampUtc,
     winnerId: pre.winnerId,
     finishOrder: [...pre.finishOrder],
@@ -134,7 +140,7 @@ function buildWinnerDeclaredPayload(
   const timestampMs = pre.startTime.getTime() + winnerCrossMs
 
   return {
-    raceId: pre.id,
+    raceRef: pre.raceRef,
     timestampUtc: new Date(timestampMs).toISOString(),
     winnerId: pre.winnerId,
     finishOrder: [...pre.finishOrder],
@@ -179,7 +185,7 @@ function announceWinnerDeclaredIfNeeded(currentTickIndex: number): void {
     return
   }
 
-  const rec = activeRaces.get(precomputed.id)
+  const rec = activeRaces.get(precomputed.raceId)
   if (rec?.winnerDeclaredSent) return
 
   const payload = buildWinnerDeclaredPayload(precomputed)
@@ -187,22 +193,22 @@ function announceWinnerDeclaredIfNeeded(currentTickIndex: number): void {
 
   if (rec) {
     rec.winnerDeclaredSent = true
-    activeRaces.set(precomputed.id, rec)
+    activeRaces.set(precomputed.raceId, rec)
   }
 
   RaceWebSocketServer.broadcast({
     type: 'race:winner-declared',
     ...payload,
-  })
+  }, precomputed.raceId)
 }
 
 function persistCompletedRace(pre: PrecomputedRace): void {
   try {
     const storagePolicy = getRaceArtifactStoragePolicy()
     if (!pre.finalHorseStateMatrix || !pre.eventTimeline) {
-      persistence.markUnsaved(pre.id)
+      persistence.markUnsaved(pre.raceId)
       recordArtifactWrite({
-        raceId: pre.id,
+        raceId: pre.raceId,
         status: 'unsaved',
         wroteArtifacts: false,
         artifactCountsByType: {},
@@ -215,7 +221,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
       })
       void raceRepository
         .markRaceFinished({
-          raceId: pre.id,
+          raceId: pre.raceId,
           actualEndTime: pre.endTime ?? null,
           checksum: pre.checksum ?? null,
           winnerId: pre.winnerId,
@@ -247,7 +253,8 @@ function persistCompletedRace(pre: PrecomputedRace): void {
       finishTimesMs: pre.finishTimesMs,
     })
     const data = {
-      raceId: pre.id,
+      raceId: pre.raceId,
+      raceRef: pre.raceRef,
       privateSeed: pre.config.seed,
       authoritativeFinish,
       precomputedPaths: pre.finalHorseStateMatrix,
@@ -261,7 +268,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
     if (!storagePolicy.persistArtifacts || storagePolicy.artifactDryRun) {
       const eventsCount = countTimelineEvents(pre.eventTimeline)
       recordArtifactWrite({
-        raceId: pre.id,
+        raceId: pre.raceId,
         status: !storagePolicy.persistArtifacts
           ? 'disabled'
           : storagePolicy.artifactDryRun
@@ -278,7 +285,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
       })
       void raceRepository
         .markRaceFinished({
-          raceId: pre.id,
+          raceId: pre.raceId,
           actualEndTime: pre.endTime ?? null,
           checksum: pre.checksum ?? null,
           winnerId: pre.winnerId,
@@ -296,7 +303,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
     }
 
     void persistence
-      .saveRace(pre.id, data as any)
+      .saveRace(pre.raceId, data as any)
       .then(async (result) => {
         const artifactCountsByType = result.artifacts.reduce(
           (counts, artifact) => {
@@ -307,7 +314,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
           {} as Record<string, number>,
         )
         recordArtifactWrite({
-          raceId: pre.id,
+          raceId: pre.raceId,
           status: result.persistenceStatus,
           wroteArtifacts: result.artifacts.length > 0,
           artifactCountsByType,
@@ -319,7 +326,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
           error: null,
         })
         await raceRepository.markRaceFinished({
-          raceId: pre.id,
+          raceId: pre.raceId,
           actualEndTime: pre.endTime ?? null,
           checksum: pre.checksum ?? null,
           winnerId: pre.winnerId,
@@ -334,7 +341,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
         })
         await raceArtifactRepository.upsertArtifacts(
           result.artifacts.map((artifact) => ({
-            raceId: pre.id,
+            raceId: pre.raceId,
             artifactType: artifact.artifactType,
             storageProvider: artifact.storageProvider,
             storageKey: artifact.storageKey,
@@ -345,9 +352,9 @@ function persistCompletedRace(pre: PrecomputedRace): void {
         )
       })
       .catch(async (e) => {
-        log(`[${ts()}][PERSIST][${pre.id}] ${e?.message || e}`)
+        log(`[${ts()}][PERSIST][${pre.raceRef}] ${e?.message || e}`)
         recordArtifactWrite({
-          raceId: pre.id,
+          raceId: pre.raceId,
           status: 'unsaved',
           wroteArtifacts: false,
           artifactCountsByType: {},
@@ -359,7 +366,7 @@ function persistCompletedRace(pre: PrecomputedRace): void {
           error: e?.message ?? String(e),
         })
         await raceRepository.markRaceFinished({
-          raceId: pre.id,
+          raceId: pre.raceId,
           actualEndTime: pre.endTime ?? null,
           checksum: pre.checksum ?? null,
           winnerId: pre.winnerId,
@@ -374,9 +381,9 @@ function persistCompletedRace(pre: PrecomputedRace): void {
         })
       })
   } catch (e: any) {
-    log(`[${ts()}][PERSIST][${pre.id}] compose-error ${e?.message || e}`)
+    log(`[${ts()}][PERSIST][${pre.raceRef}] compose-error ${e?.message || e}`)
     recordArtifactWrite({
-      raceId: pre.id,
+      raceId: pre.raceId,
       status: 'unsaved',
       wroteArtifacts: false,
       artifactCountsByType: {},
@@ -388,9 +395,9 @@ function persistCompletedRace(pre: PrecomputedRace): void {
       error: e?.message ?? String(e),
     })
     try {
-      persistence.markUnsaved(pre.id)
+      persistence.markUnsaved(pre.raceId)
     } catch {}
-    void raceRepository.markPersistenceStatus(pre.id, 'unsaved').catch(() => {})
+    void raceRepository.markPersistenceStatus(pre.raceId, 'unsaved').catch(() => {})
   }
 }
 
@@ -505,7 +512,7 @@ export function generateRaceTicks(
   horses: HorseSeed[],
   config: RaceConfig,
   rng: () => number,
-  publicRaceId = 'race-pending',
+  raceRef = 'N9-PEND0-00000',
 ): {
   ticks: PrecomputedTick[]
   finishOrder: string[]
@@ -514,7 +521,6 @@ export function generateRaceTicks(
   // New: exact crossing tick index per horse
   finishTickIndex: Record<string, number>
 } {
-  const raceId = publicRaceId
   const finishLine = config.trackLength * config.finishRatio
   const totalFrames = Math.floor(config.durationMs / config.dtMs)
   const dtSec = config.dtMs / 1000
@@ -535,21 +541,21 @@ export function generateRaceTicks(
   }
 
   log(
-    `[${ts()}][RACE][${raceId}] Precompute begin. finishLine=${finishLine.toFixed(
+    `[${ts()}][RACE][${raceRef}] Precompute begin. finishLine=${finishLine.toFixed(
       2,
     )} track=${config.trackLength}m duration=${config.durationMs}ms dt=${
       config.dtMs
     }ms`,
   )
   log(
-    `[${ts()}][TICKS][${raceId}] Precomputing ${
+    `[${ts()}][TICKS][${raceRef}] Precomputing ${
       totalFrames + 1
     } ticks`,
   )
   if (VERBOSE) {
     horses.forEach((h) =>
       log(
-        `[${ts()}][HORSE][${raceId}] Horse-${
+        `[${ts()}][HORSE][${raceRef}] Horse-${
           h.id
         } start position=0.00 baseSpeed=${h.baseSpeed.toFixed(
           2,
@@ -619,16 +625,16 @@ export function generateRaceTicks(
   const sampleFirst = ticks.slice(0, 3)
   const sampleLast = ticks.slice(-3)
   log(
-    `[${ts()}][TICKS][${raceId}] Sample ticks: first3=${JSON.stringify(
+    `[${ts()}][TICKS][${raceRef}] Sample ticks: first3=${JSON.stringify(
       sampleFirst,
     )} last3=${JSON.stringify(sampleLast)}`,
   )
   log(
-    `[${ts()}][RACE][${raceId}] Base finish times (ms): ${JSON.stringify(
+    `[${ts()}][RACE][${raceRef}] Base finish times (ms): ${JSON.stringify(
       finishTimesMs,
     )}`,
   )
-  log(`[${ts()}][RACE][${raceId}] Base pre-event winner=${winnerId}`)
+  log(`[${ts()}][RACE][${raceRef}] Base pre-event winner=${winnerId}`)
 
   return { ticks, finishOrder, finishTimesMs, winnerId, finishTickIndex }
 }
@@ -637,17 +643,23 @@ export function generateRaceTicks(
  * Create and store a precomputed race shortly before the scheduled start.
  * Uses the single RNG created from the current seed stored in RaceState.
  */
+export type RaceIdentityFactories = Readonly<{
+  raceId?: RaceIdFactory
+  raceRef?: RaceRefFactory
+}>
+
 export function seedPrecomputedRace(
-  raceIdFactory: RaceIdFactory = createOpaqueRaceId,
+  factories: RaceIdentityFactories = {},
 ): PrecomputedRace {
   const baseSeedStr = RaceState.getCurrentSeed()
   if (!baseSeedStr) {
     throw new Error('Active cycle seed not set')
   }
 
-  // Allocate once, before any deterministic finish retry. Internal seed changes
-  // must never change the public identity of this race.
-  const raceId = raceIdFactory()
+  // Allocate both identities once, before deterministic finish retries. Neither
+  // identity is derived from the replay seed or from the other identity.
+  const raceId = (factories.raceId ?? createOpaqueRaceId)()
+  const raceRef = allocateUniqueRaceRef(factories.raceRef ?? createRaceRef)
 
   let seededRace: SeededRaceBuild | null = null
   let selectedSeedStr = baseSeedStr
@@ -656,7 +668,12 @@ export function seedPrecomputedRace(
     const candidateSeed =
       attempt === 0 ? baseSeedStr : `${baseSeedStr}:finish-retry-${attempt}`
     const candidateSeedInt = hashStringToInt(candidateSeed)
-    const candidate = buildSeededRace(raceId, candidateSeed, candidateSeedInt)
+    const candidate = buildSeededRace(
+      raceId,
+      raceRef,
+      candidateSeed,
+      candidateSeedInt,
+    )
     if (candidate.crossingsCount > 0) {
       seededRace = candidate
       selectedSeedStr = candidateSeed
@@ -664,7 +681,7 @@ export function seedPrecomputedRace(
     }
 
     log(
-      `[${ts()}][RACE][${raceId}] Deterministic attempt ${
+      `[${ts()}][RACE][${raceRef}] Deterministic attempt ${
         attempt + 1
       } produced no canonical crossings; retrying`,
     )
@@ -679,6 +696,7 @@ export function seedPrecomputedRace(
   }
 
   precomputed = seededRace.precomputed
+  const allocatedRace = precomputed
   lastStreamedIndex = null
   clearEngineError()
 
@@ -701,8 +719,8 @@ export function seedPrecomputedRace(
     // no-op (non-fatal; additive only)
   }
 
-  log(`[${ts()}][RACE][${raceId}] Seeded race`, {
-    raceId,
+  log(`[${ts()}][RACE][${raceRef}] Seeded race`, {
+    raceRef,
     trackLength: precomputed.config.trackLength,
     finishLine: precomputed.finishLine,
     durationMs: precomputed.config.durationMs,
@@ -710,34 +728,56 @@ export function seedPrecomputedRace(
     winnerId: precomputed.winnerId,
   })
 
+  const announceRaceInfo = () => {
+    RaceWebSocketServer.broadcast(
+      {
+        type: 'race:info',
+        raceRef: allocatedRace.raceRef,
+        horseOrder: allocatedRace.horses.map((horse) => horse.id),
+        config: sanitizeRaceConfig(allocatedRace.config),
+        currentTickIndex: -1,
+      },
+      raceId,
+    )
+  }
+
   void raceRepository
     .upsertSeededRace({
       raceId,
+      raceRef,
       seed: selectedSeedStr,
       checksum: precomputed.checksum ?? null,
       config: privateSeedFreeConfig(precomputed.config),
       eventsCount: seededRace.eventsCount,
     })
-    .catch((e) =>
-      log(`[${ts()}][DB][${raceId}] seed-upsert-error ${e?.message || e}`),
-    )
-  try {
-    RaceWebSocketServer.broadcast({
-      type: 'race:info',
-      raceId: precomputed!.id,
-      horseOrder: precomputed!.horses.map((h) => h.id),
-      config: sanitizeRaceConfig(precomputed!.config),
-      currentTickIndex: -1,
+    .then((storedRaceRef) => {
+      if (storedRaceRef && storedRaceRef !== allocatedRace.raceRef) {
+        // A cross-process database collision is still part of allocation. Update
+        // the public identity before announcing it and rebind the checksum.
+        allocatedRace.raceRef = storedRaceRef
+        allocatedRace.checksum = computeRaceChecksum(allocatedRace)
+        void raceRepository.upsertSeededRace({
+          raceId,
+          raceRef: storedRaceRef,
+          seed: selectedSeedStr,
+          checksum: allocatedRace.checksum ?? null,
+          config: privateSeedFreeConfig(allocatedRace.config),
+          eventsCount: seededRace!.eventsCount,
+        })
+      }
+      announceRaceInfo()
     })
-  } catch {
-    // non-fatal: clients will receive race:info on next reconnect
-  }
+    .catch((e) => {
+      log(`[${ts()}][DB][${raceRef}] seed-upsert-error ${e?.message || e}`)
+      announceRaceInfo()
+    })
 
   return precomputed
 }
 
 function buildSeededRace(
   raceId: string,
+  raceRef: string,
   seedStr: string,
   seedInt: number,
 ): SeededRaceBuild {
@@ -755,7 +795,7 @@ function buildSeededRace(
   const horses = generateHorseSeeds(HORSE_COUNT, rng)
   const t0 = performance.now()
   const { ticks, finishOrder, finishTimesMs, winnerId, finishTickIndex } =
-    generateRaceTicks(horses, config, rng, raceId)
+    generateRaceTicks(horses, config, rng, raceRef)
   const tTicksMs = performance.now() - t0
   engineMetrics.recordPrecomputeMs(tTicksMs)
   engineMetrics.recordPrecomputePhase('ticks', tTicksMs)
@@ -825,7 +865,8 @@ function buildSeededRace(
   )
 
   const nextPrecomputed: PrecomputedRace = {
-    id: raceId,
+    raceId,
+    raceRef,
     config,
     horses,
     ticks: frozenTicks as unknown as PrecomputedTick[],
@@ -845,7 +886,7 @@ function buildSeededRace(
   try {
     const checksum = computeRaceChecksum(nextPrecomputed)
     nextPrecomputed.checksum = checksum
-    log(`[${ts()}][RACE][${raceId}] checksum=${checksum}`)
+    log(`[${ts()}][RACE][${raceRef}] checksum=${checksum}`)
   } catch {
     // non-fatal
   }
@@ -883,12 +924,12 @@ export function startPrecomputedRace(startTime = new Date()): PrecomputedRace {
 
   log(
     `[${ts()}][RACE][${
-      precomputed.id
+      precomputed.raceRef
     }] Race started at ${startTime.toISOString()}`,
   )
 
   currentRace = {
-    id: precomputed.id,
+    raceId: precomputed.raceId,
     horses: precomputed.horses.map((h) => ({
       id: h.id,
       name: h.name,
@@ -913,28 +954,28 @@ export function startPrecomputedRace(startTime = new Date()): PrecomputedRace {
   RaceWebSocketServer.broadcast({
     type: 'race:start',
     timestampUtc: startTime.toISOString(),
-    raceId: precomputed.id,
+    raceRef: precomputed.raceRef,
     horseOrder: currentRace.horses.map((h) => h.id),
     horses: currentRace.horses.map((h) => ({ id: h.id, name: h.name })),
-  })
+  }, precomputed.raceId)
 
   // Mark as active for catch-up consumers
   try {
-    const rec = activeRaces.get(precomputed.id)
+    const rec = activeRaces.get(precomputed.raceId)
     if (rec) {
       rec.startTime = startTime.getTime()
       rec.currentTickIndex = -1
       rec.winnerDeclaredSent = false
-      activeRaces.set(precomputed.id, rec)
+      activeRaces.set(precomputed.raceId, rec)
     }
   } catch {
     // non-fatal
   }
   void raceRepository
-    .markRaceStarted(precomputed.id, startTime)
+    .markRaceStarted(precomputed.raceId, startTime)
     .catch((e) =>
       log(
-        `[${ts()}][DB][${precomputed?.id}] start-update-error ${e?.message || e}`,
+        `[${ts()}][DB][${precomputed?.raceRef}] start-update-error ${e?.message || e}`,
       ),
     )
   return precomputed
@@ -951,7 +992,7 @@ function broadcastTickSafe(
   if (tickIndex <= runtimeRace.lastBroadcastedTick) {
     log(
       `[${ts()}][TICK][${
-        runtimeRace.id
+        precomputed?.raceRef ?? 'pending'
       }] Dropping duplicate/old tick idx=${tickIndex} last=${
         runtimeRace.lastBroadcastedTick
       }`,
@@ -961,7 +1002,7 @@ function broadcastTickSafe(
   if (tickIndex > runtimeRace.lastBroadcastedTick + 1) {
     const skipped = tickIndex - runtimeRace.lastBroadcastedTick - 1
     log(
-      `[${ts()}][TICK][${runtimeRace.id}] Skipping ${skipped} ticks (last=${
+      `[${ts()}][TICK][${precomputed?.raceRef ?? 'pending'}] Skipping ${skipped} ticks (last=${
         runtimeRace.lastBroadcastedTick
       }, now=${tickIndex})`,
     )
@@ -985,15 +1026,14 @@ function broadcastTickSafe(
 
   RaceWebSocketServer.broadcast({
     type: 'race:tick',
-    raceId: runtimeRace.id,
+    raceRef: precomputed?.raceRef ?? 'N9-PEND0-00000',
     data: {
-      raceId: runtimeRace.id,
       tickIndex,
       positions: _posBuffer,
       events,
       effects,
     },
-  })
+  }, runtimeRace.raceId)
   runtimeRace.lastBroadcastedTick = tickIndex
 }
 
@@ -1099,7 +1139,7 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
   if (Math.abs(driftMs) > precomputed.config.dtMs / 2) {
     log(
       `[${ts()}][SYNC][${
-        precomputed.id
+        precomputed.raceRef
       }] Drift=${driftMs}ms (elapsed=${elapsedMs}ms, tickTs=${
         idx * precomputed.config.dtMs
       }ms)`,
@@ -1109,7 +1149,7 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
     const skipped = idx - lastStreamedIndex - 1
     log(
       `[${ts()}][SYNC][${
-        precomputed.id
+        precomputed.raceRef
       }] Skipped ${skipped} intermediate ticks (last=${lastStreamedIndex}, now=${idx})`,
     )
   }
@@ -1125,7 +1165,7 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
 
   log(
     `[${ts()}][TICK][${
-      precomputed.id
+      precomputed.raceRef
     }] Stream tick index=${idx} elapsed=${elapsedMs}ms`,
   )
 
@@ -1133,10 +1173,10 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
   if (currentRace) {
     broadcastTickSafe(currentRace, idx, updates, events, effects)
   }
-  const rec = activeRaces.get(precomputed.id)
+  const rec = activeRaces.get(precomputed.raceId)
   if (rec) {
     rec.currentTickIndex = idx
-    activeRaces.set(precomputed.id, rec)
+    activeRaces.set(precomputed.raceId, rec)
   }
   announceWinnerDeclaredIfNeeded(idx)
   consecutiveTickFailures = 0
@@ -1156,7 +1196,7 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
         const h = currentRace!.horses.find((hh) => hh.id === id)
         if (!h) {
           log(
-            `[${ts()}][RACE][${precomputed!.id}] WARNING: horse ${id} not in currentRace.horses; skipping`,
+            `[${ts()}][RACE][${precomputed!.raceRef}] WARNING: horse ${id} not in currentRace.horses; skipping`,
           )
         }
         return h
@@ -1172,7 +1212,7 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
     )
 
     log(
-      `[${ts()}][RACE][${precomputed.id}] Race finished. Winner=${currentRace.winner!.id}`,
+      `[${ts()}][RACE][${precomputed.raceRef}] Race finished. Winner=${currentRace.winner!.id}`,
     )
 
     // Persist canonical artifacts
@@ -1181,7 +1221,7 @@ export function streamPrecomputedTicks(now = new Date()): PositionUpdate[] {
     RaceWebSocketServer.broadcast({
       type: 'race:finish',
       ...precomputed.authoritativeFinish,
-    })
+    }, precomputed.raceId)
   }
 
   return updates
@@ -1407,10 +1447,10 @@ export function streamPrecomputedTickAt(tickIndex: number): PositionUpdate[] {
   announceWinnerDeclaredIfNeeded(idx)
 
   // Update authoritative current tick for catch-up consumers
-  const rec = activeRaces.get(precomputed.id)
+  const rec = activeRaces.get(precomputed.raceId)
   if (rec) {
     rec.currentTickIndex = idx
-    activeRaces.set(precomputed.id, rec)
+    activeRaces.set(precomputed.raceId, rec)
   }
 
   // Finish when last tick reached
@@ -1446,7 +1486,7 @@ export function streamPrecomputedTickAt(tickIndex: number): PositionUpdate[] {
     RaceWebSocketServer.broadcast({
       type: 'race:finish',
       ...precomputed.authoritativeFinish,
-    })
+    }, precomputed.raceId)
 
     // Clear the live runtime race. Archiving is deferred to releaseRace() at the
     // cycle boundary so RaceState.getPrecomputedRace() keeps returning this race
@@ -1460,7 +1500,7 @@ export function streamPrecomputedTickAt(tickIndex: number): PositionUpdate[] {
     // Remove from catch-up memory once finished to avoid stale sync
     // (clients should not request catch-up for completed races).
     try {
-      activeRaces.delete(precomputed.id)
+      activeRaces.delete(precomputed.raceId)
     } catch {
       // non-fatal
     }

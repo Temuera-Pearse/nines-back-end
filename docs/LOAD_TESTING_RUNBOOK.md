@@ -15,7 +15,7 @@ The harness produces:
 - Node.js 18+
 - backend dependencies installed with `npm install`
 - backend server running locally or reachable over HTTP/WebSocket
-- race engine healthy enough to serve `/race/metrics`, `/metrics`, and `/race/results/:raceId`
+- race engine healthy enough to serve `/race/metrics`, `/metrics`, and `/race/results/:raceRef`
 
 ## Start The Backend
 

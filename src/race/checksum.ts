@@ -4,6 +4,8 @@ import type { EventTimeline } from './events/timeline.js'
 
 export function computeRaceChecksum(pre: PrecomputedRace): string {
   const payload = {
+    // Bind the public artifact identity without exposing the private database ID.
+    raceRef: pre.raceRef,
     horses: pre.horses.map((h) => ({
       id: h.id,
       name: h.name,

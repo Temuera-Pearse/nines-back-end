@@ -13,7 +13,7 @@ export interface Horse {
  * Represents a single tick update during a race
  */
 export interface RaceTick {
-  raceId: string
+  raceRef: string
   tick: number
   horses: Array<{
     id: string
@@ -25,7 +25,7 @@ export interface RaceTick {
  * Final results of a completed race
  */
 export interface RaceResult {
-  raceId: string
+  raceRef: string
   finishOrder: string[]
   finishTimes: Record<string, number> // seconds
 }
@@ -34,7 +34,8 @@ export interface RaceResult {
  * Complete race data
  */
 export interface Race {
-  id: string
+  /** Private internal identity. Never serialize this object directly. */
+  raceId: string
   horses: Horse[]
   isActive: boolean
   winner?: Horse
@@ -62,7 +63,7 @@ export interface RaceFinishPresentation {
 }
 
 export interface RaceFinishPayload {
-  raceId: string
+  raceRef: string
   timestampUtc: string
   winnerId: string
   finishOrder: string[]
@@ -72,7 +73,7 @@ export interface RaceFinishPayload {
 }
 
 export interface RaceWinnerDeclaredPayload {
-  raceId: string
+  raceRef: string
   timestampUtc: string
   winnerId: string
   finishOrder: string[]
@@ -98,7 +99,7 @@ export type WebSocketMessage =
   | {
       type: 'race:info'
       protoVer: number
-      raceId: string
+      raceRef: string
       horseOrder: string[]
       config: RaceConfig
       currentTickIndex: number
@@ -106,7 +107,7 @@ export type WebSocketMessage =
   | {
       type: 'race:start'
       protoVer?: number
-      raceId: string
+      raceRef: string
       timestampUtc: string
       horseOrder: string[]
       horses: Array<{ id: string; name: string }>
@@ -114,7 +115,7 @@ export type WebSocketMessage =
   | {
       type: 'race:tick' | 'race:keyframe' | 'race:delta'
       protoVer?: number
-      raceId: string
+      raceRef: string
       seq?: number
       tickIndex: number
       tickTs?: number
@@ -125,7 +126,7 @@ export type WebSocketMessage =
   | {
       type: 'race:winner-declared'
       protoVer?: number
-      raceId: string
+      raceRef: string
       timestampUtc: string
       winnerId: string
       finishOrder: string[]
@@ -139,7 +140,7 @@ export type WebSocketMessage =
   | {
       type: 'race:finish'
       protoVer?: number
-      raceId: string
+      raceRef: string
       timestampUtc: string
       winnerId: string
       finishOrder: string[]
@@ -150,13 +151,13 @@ export type WebSocketMessage =
   | {
       type: 'race:catchup'
       protoVer: number
-      raceId: string
+      raceRef: string
       startIndex: number
       currentTickIndex: number
       ticks: Array<{
         type: 'race:tick'
         protoVer: number
-        raceId: string
+        raceRef: string
         seq: number
         tickIndex: number
         tickTs: number
@@ -166,7 +167,7 @@ export type WebSocketMessage =
   | {
       type: 'race:sync-complete'
       protoVer: number
-      raceId: string
+      raceRef: string
       currentTickIndex: number
     }
   | { type: 'error'; protoVer: number; message: string }
@@ -198,7 +199,10 @@ export interface PrecomputedTick {
 }
 
 export interface PrecomputedRace {
-  id: string
+  /** Private database/coordination identity. */
+  raceId: string
+  /** Public, non-derivable race reference. */
+  raceRef: string
   config: RaceConfig
   horses: HorseSeed[]
   ticks: PrecomputedTick[]

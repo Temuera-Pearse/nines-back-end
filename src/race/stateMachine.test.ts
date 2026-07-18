@@ -27,7 +27,7 @@ describe('RaceStateMachine mid-cycle seeding', () => {
 
     expect(() => stateMachine.tick()).not.toThrow()
     expect(RaceState.getCurrentSeed()).toBeTruthy()
-    expect(RaceState.getPrecomputedRace()?.id).toBeTruthy()
+    expect(RaceState.getPrecomputedRace()?.raceId).toBeTruthy()
     expect(stateMachine.getPhaseAndSecond()).toMatchObject({
       phase: 'countdown',
       second: 28,
@@ -45,7 +45,7 @@ describe('RaceStateMachine mid-cycle seeding', () => {
 
     expect(() => stateMachine.tick()).not.toThrow()
     expect(RaceState.getCurrentSeed()).toBeTruthy()
-    expect(RaceState.getPrecomputedRace()?.id).toBeTruthy()
+    expect(RaceState.getPrecomputedRace()?.raceId).toBeTruthy()
     expect(stateMachine.getPhaseAndSecond()).toMatchObject({
       phase: 'race_running',
       second: 30,

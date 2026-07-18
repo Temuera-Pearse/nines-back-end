@@ -12,7 +12,7 @@ function regenerateSimulationRace(): void {
     RaceState.setCurrentSeed(fixed || `simulation-restart-${cycleId}`)
     const seeded = seedPrecomputedRace()
     RaceState.setPrecomputedRace(seeded)
-    logEvent('restart:simulation-regenerated', { raceId: seeded.id })
+    logEvent('restart:simulation-regenerated', { raceRef: seeded.raceRef })
   } catch (e: any) {
     logEvent('restart:simulation-regenerate-error', {
       error: e?.message ?? String(e),
@@ -35,7 +35,7 @@ export function runRestartRecovery(): void {
     if (pre.config?.seed) {
       RaceState.setCurrentSeed(pre.config.seed)
       logEvent('restart:seed-restored', {
-        raceId: pre.id,
+        raceRef: pre.raceRef,
       })
     }
   } catch {
@@ -45,22 +45,22 @@ export function runRestartRecovery(): void {
   // On restart, avoid wall-clock derived progress; let engine tick authority resume.
   try {
     MasterTimeline.schedule(
-      `recovery:${pre.id}:marker`,
+      `recovery:${pre.raceId}:marker`,
       0,
       () => {
         // marker only; scheduler continues streaming
       },
-      pre.id,
+      pre.raceId,
     )
 
     logEvent('restart:resume', {
-      raceId: pre.id,
-      currentTickIndex: activeRaces.get(pre.id)?.currentTickIndex ?? -1,
-      ticksAvailable: activeRaces.get(pre.id)?.ticks.length ?? 0,
+      raceRef: pre.raceRef,
+      currentTickIndex: activeRaces.get(pre.raceId)?.currentTickIndex ?? -1,
+      ticksAvailable: activeRaces.get(pre.raceId)?.ticks.length ?? 0,
     })
   } catch (e: any) {
     logEvent('restart:error', {
-      raceId: pre.id,
+      raceRef: pre.raceRef,
       error: e?.message ?? String(e),
     })
   }

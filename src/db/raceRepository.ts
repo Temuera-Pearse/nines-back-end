@@ -8,9 +8,11 @@ import type {
   UpsertSeededRaceInput,
 } from './types.js'
 import { isRaceDataPersistenceEnabled } from '../persistence/raceDataPersistencePolicy.js'
+import { createRaceRef } from '../race/raceId.js'
 
 type RaceRow = QueryResultRow & {
   race_id: string
+  race_ref: string | null
   seed: string
   lifecycle_status: RaceLifecycleStatus
   scheduled_start_time: Date | null
@@ -32,6 +34,7 @@ type RaceRow = QueryResultRow & {
 function mapRaceRow(row: RaceRow): RaceRecord {
   return {
     raceId: row.race_id,
+    raceRef: row.race_ref ?? null,
     seed: row.seed,
     lifecycleStatus: row.lifecycle_status,
     scheduledStartTime: row.scheduled_start_time,
@@ -55,7 +58,7 @@ function mapRaceRow(row: RaceRow): RaceRecord {
 }
 
 export interface RaceRepository {
-  upsertSeededRace(input: UpsertSeededRaceInput): Promise<void>
+  upsertSeededRace(input: UpsertSeededRaceInput): Promise<string | null>
   markRaceStarted(raceId: string, actualStartTime: Date): Promise<void>
   markRaceFinished(input: MarkRaceFinishedInput): Promise<void>
   markRaceArchived(raceId: string): Promise<void>
@@ -67,18 +70,23 @@ export interface RaceRepository {
   findPreviousRace(): Promise<RaceRecord | null>
   listRaceHistory(limit: number): Promise<RaceRecord[]>
   findRaceById(raceId: string): Promise<RaceRecord | null>
+  findRaceByRef(raceRef: string): Promise<RaceRecord | null>
 }
 
 export class PgRaceRepository implements RaceRepository {
-  async upsertSeededRace(input: UpsertSeededRaceInput): Promise<void> {
-    if (!isRaceDataPersistenceEnabled()) return
+  async upsertSeededRace(input: UpsertSeededRaceInput): Promise<string | null> {
+    if (!isRaceDataPersistenceEnabled()) return input.raceRef
     const pool = getOptionalPool()
-    if (!pool) return
+    if (!pool) return input.raceRef
 
-    await pool.query(
-      `
+    let raceRef = input.raceRef
+    for (let attempt = 0; attempt < 128; attempt++) {
+      try {
+        const result = await pool.query<{ race_ref: string | null }>(
+          `
         insert into races (
           race_id,
+          race_ref,
           seed,
           lifecycle_status,
           scheduled_start_time,
@@ -88,25 +96,39 @@ export class PgRaceRepository implements RaceRepository {
           persistence_status,
           created_at,
           updated_at
-        ) values ($1, $2, 'seeded', $3, $4, $5::jsonb, $6, 'pending', now(), now())
+        ) values ($1, $2, $3, 'seeded', $4, $5, $6::jsonb, $7, 'pending', now(), now())
         on conflict (race_id) do update
         set seed = excluded.seed,
+            race_ref = coalesce(races.race_ref, excluded.race_ref),
             lifecycle_status = excluded.lifecycle_status,
             scheduled_start_time = excluded.scheduled_start_time,
             checksum = excluded.checksum,
             config = excluded.config,
             events_count = excluded.events_count,
             updated_at = now()
-      `,
-      [
-        input.raceId,
-        input.seed,
-        input.scheduledStartTime ?? null,
-        input.checksum ?? null,
-        JSON.stringify(input.config),
-        input.eventsCount ?? 0,
-      ],
-    )
+        returning race_ref
+          `,
+          [
+            input.raceId,
+            raceRef,
+            input.seed,
+            input.scheduledStartTime ?? null,
+            input.checksum ?? null,
+            JSON.stringify(input.config),
+            input.eventsCount ?? 0,
+          ],
+        )
+        return result.rows[0]?.race_ref ?? raceRef
+      } catch (error: any) {
+        const isRaceRefCollision =
+          error?.code === '23505' &&
+          (error?.constraint === 'races_race_ref_uidx' ||
+            String(error?.message ?? '').includes('race_ref'))
+        if (!isRaceRefCollision || raceRef === null) throw error
+        raceRef = createRaceRef()
+      }
+    }
+    throw new Error('Unable to persist a unique race reference')
   }
 
   async markRaceStarted(raceId: string, actualStartTime: Date): Promise<void> {
@@ -265,6 +287,23 @@ export class PgRaceRepository implements RaceRepository {
         limit 1
       `,
       [raceId],
+    )
+    return result.rows[0] ? mapRaceRow(result.rows[0]) : null
+  }
+
+  async findRaceByRef(raceRef: string): Promise<RaceRecord | null> {
+    if (!isRaceDataPersistenceEnabled()) return null
+    const pool = getOptionalPool()
+    if (!pool) return null
+
+    const result = await pool.query<RaceRow>(
+      `
+        select *
+        from races
+        where race_ref = $1
+        limit 1
+      `,
+      [raceRef.toUpperCase()],
     )
     return result.rows[0] ? mapRaceRow(result.rows[0]) : null
   }

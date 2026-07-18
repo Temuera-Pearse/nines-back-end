@@ -27,7 +27,10 @@ export type RaceOutcome = Readonly<{
 }>
 
 export type RaceData = Readonly<{
+  /** Private storage key/relationship identity. */
   raceId: string
+  /** Public identity included in verifiable artifacts. */
+  raceRef: string
   // Internal replay material. Artifact storage must remain access-controlled.
   privateSeed: string
   authoritativeFinish: RaceFinishPayload
@@ -134,6 +137,7 @@ export class FileRacePersistence implements RacePersistence {
     const eventsCount = countEventTimeline(data.eventTimeline)
     const summary = {
       raceId: data.raceId,
+      raceRef: data.raceRef,
       privateSeed: data.privateSeed,
       authoritativeFinish: data.authoritativeFinish,
       outcome: data.outcome,
@@ -307,6 +311,7 @@ export class S3RacePersistence implements RacePersistence {
     const eventsCount = countEventTimeline(data.eventTimeline)
     const summary = {
       raceId: data.raceId,
+      raceRef: data.raceRef,
       privateSeed: data.privateSeed,
       authoritativeFinish: data.authoritativeFinish,
       outcome: data.outcome,

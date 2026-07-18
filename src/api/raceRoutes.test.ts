@@ -82,26 +82,26 @@ describe('raceRoutes requireApiToken', () => {
     process.env.REQUIRE_API_TOKEN = '1'
     process.env.API_TOKEN = 'secret'
 
-    vi.spyOn(RaceState, 'getHistory').mockReturnValue([{ id: 'r1' }] as any)
+    vi.spyOn(RaceState, 'getHistory').mockReturnValue([{ raceRef: 'r1' }] as any)
 
     const res = await request(makeApp())
       .get('/race/history')
       .set('x-api-token', 'secret')
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual([{ raceId: 'r1' }])
+    expect(res.body).toEqual([{ raceRef: 'r1' }])
   })
 
   it('accepts token via query param', async () => {
     process.env.REQUIRE_API_TOKEN = '1'
     process.env.API_TOKEN = 'secret'
 
-    vi.spyOn(RaceState, 'getHistory').mockReturnValue([{ id: 'r1' }] as any)
+    vi.spyOn(RaceState, 'getHistory').mockReturnValue([{ raceRef: 'r1' }] as any)
 
     const res = await request(makeApp()).get('/race/history?token=secret')
 
     expect(res.status).toBe(200)
-    expect(res.body).toEqual([{ raceId: 'r1' }])
+    expect(res.body).toEqual([{ raceRef: 'r1' }])
   })
 })
 
@@ -115,7 +115,7 @@ describe('raceRoutes endpoints', () => {
 
   it('GET /race/current returns race summary', async () => {
     vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue({
-      id: 'race-1',
+      raceRef: 'race-1',
       config: {
         seed: 's',
         privateSeed: 'defensive-private-seed',
@@ -130,7 +130,7 @@ describe('raceRoutes endpoints', () => {
     const res = await request(makeApp()).get('/race/current')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
-      raceId: 'race-1',
+      raceRef: 'race-1',
       config: { dtMs: 50 },
       finishLine: 123,
       startTime: 1000,
@@ -141,7 +141,7 @@ describe('raceRoutes endpoints', () => {
   it('GET /race/current falls back to read service when memory is empty', async () => {
     vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue(null)
     raceReadServiceMock.getCurrentRaceSummary.mockResolvedValue({
-      raceId: 'race-db-1',
+      raceRef: 'race-db-1',
       config: {
         seed: 'db-seed',
         privateSeed: 'defensive-private-db-seed',
@@ -156,7 +156,7 @@ describe('raceRoutes endpoints', () => {
     const res = await request(makeApp()).get('/race/current')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
-      raceId: 'race-db-1',
+      raceRef: 'race-db-1',
       config: { durationMs: 20000 },
       finishLine: 1000,
       startTime: '2026-03-16T00:00:30.000Z',
@@ -164,15 +164,15 @@ describe('raceRoutes endpoints', () => {
     })
   })
 
-  it('GET /race/timeline/:raceId rejects the active race artifact before race completion', async () => {
+  it('GET /race/timeline/:raceRef rejects the active race artifact before race completion', async () => {
     vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue({
-      id: 'race-live-1',
+      raceRef: 'N9-LVE00-00001',
     } as any)
     vi.spyOn(RaceState, 'getStateMachine').mockReturnValue({
       getPhaseAndSecond: () => ({ phase: 'countdown', second: 9 }),
     } as any)
 
-    const res = await request(makeApp()).get('/race/timeline/race-live-1')
+    const res = await request(makeApp()).get('/race/timeline/N9-LVE00-00001')
 
     expect(res.status).toBe(403)
     expect(res.body).toEqual({
@@ -180,9 +180,9 @@ describe('raceRoutes endpoints', () => {
     })
   })
 
-  it('GET /race/timeline/:raceId allows historical races during countdown', async () => {
+  it('GET /race/timeline/:raceRef allows historical races during countdown', async () => {
     vi.spyOn(RaceState, 'getPrecomputedRace').mockReturnValue({
-      id: 'race-live-1',
+      raceRef: 'N9-LVE00-00001',
     } as any)
     vi.spyOn(RaceState, 'getStateMachine').mockReturnValue({
       getPhaseAndSecond: () => ({ phase: 'countdown', second: 9 }),
@@ -191,48 +191,51 @@ describe('raceRoutes endpoints', () => {
       { tick: 1, events: [{ id: 'db-event', instanceId: 'evt-1' }] },
     ])
 
-    const res = await request(makeApp()).get('/race/timeline/race-db-4')
+    const res = await request(makeApp()).get('/race/timeline/N9-DB400-00004')
 
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
+      raceRef: 'N9-DB400-00004',
       timeline: [
         { tick: 1, events: [{ id: 'db-event', instanceId: 'evt-1' }] },
       ],
     })
   })
 
-  it('GET /race/ticks/:raceId returns 404 if race missing', async () => {
-    vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue(null)
+  it('GET /race/ticks/:raceRef returns 404 if race missing', async () => {
+    vi.spyOn(RaceState, 'findPrecomputedByRef').mockReturnValue(null)
     const res = await request(makeApp()).get('/race/ticks/nope')
     expect(res.status).toBe(404)
     expect(res.body).toEqual({ error: 'Race not found' })
   })
 
-  it('GET /race/ticks/:raceId falls back to stored raw ticks when available', async () => {
-    vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue(null)
+  it('GET /race/ticks/:raceRef falls back to stored raw ticks when available', async () => {
+    vi.spyOn(RaceState, 'findPrecomputedByRef').mockReturnValue(null)
     raceReadServiceMock.getRawTicks.mockResolvedValue([
       { timestampOffsetMs: 0, positions: [] },
     ])
 
-    const res = await request(makeApp()).get('/race/ticks/race-db-2')
+    const res = await request(makeApp()).get('/race/ticks/N9-DB200-00002')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
+      raceRef: 'N9-DB200-00002',
       ticks: [{ timestampOffsetMs: 0, positions: [] }],
     })
   })
 
-  it('GET /race/ticks-final/:raceId returns canonical positions', async () => {
-    vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue({
-      id: 'race-2',
+  it('GET /race/ticks-final/:raceRef returns canonical positions', async () => {
+    vi.spyOn(RaceState, 'findPrecomputedByRef').mockReturnValue({
+      raceRef: 'N9-RCE20-00002',
       finalHorseStateMatrix: [
         [{ position: 1 }, { position: 2 }],
         [{ position: 3 }, { position: 4 }],
       ],
     } as any)
 
-    const res = await request(makeApp()).get('/race/ticks-final/race-2')
+    const res = await request(makeApp()).get('/race/ticks-final/N9-RCE20-00002')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
+      raceRef: 'N9-RCE20-00002',
       ticksFinal: [
         { tickIndex: 0, positions: [1, 2] },
         { tickIndex: 1, positions: [3, 4] },
@@ -240,16 +243,17 @@ describe('raceRoutes endpoints', () => {
     })
   })
 
-  it('GET /race/ticks-final/:raceId falls back to stored artifact', async () => {
-    vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue(null)
+  it('GET /race/ticks-final/:raceRef falls back to stored artifact', async () => {
+    vi.spyOn(RaceState, 'findPrecomputedByRef').mockReturnValue(null)
     raceReadServiceMock.getFinalTicks.mockResolvedValue([
       { tickIndex: 0, positions: [10, 20] },
       { tickIndex: 1, positions: [30, 40] },
     ])
 
-    const res = await request(makeApp()).get('/race/ticks-final/race-db-3')
+    const res = await request(makeApp()).get('/race/ticks-final/N9-DB300-00003')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
+      raceRef: 'N9-DB300-00003',
       ticksFinal: [
         { tickIndex: 0, positions: [10, 20] },
         { tickIndex: 1, positions: [30, 40] },
@@ -257,7 +261,7 @@ describe('raceRoutes endpoints', () => {
     })
   })
 
-  it('GET /race/timeline/:raceId returns compact event timeline sorted by tick', async () => {
+  it('GET /race/timeline/:raceRef returns compact event timeline sorted by tick', async () => {
     const eventTimeline = new Map<number, any[]>([
       [2, [{ id: 'e2', instanceId: 'i2' }]],
       [
@@ -269,14 +273,15 @@ describe('raceRoutes endpoints', () => {
       ],
     ])
 
-    vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue({
-      id: 'race-3',
+    vi.spyOn(RaceState, 'findPrecomputedByRef').mockReturnValue({
+      raceRef: 'N9-RCE30-00003',
       eventTimeline,
     } as any)
 
-    const res = await request(makeApp()).get('/race/timeline/race-3')
+    const res = await request(makeApp()).get('/race/timeline/N9-RCE30-00003')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
+      raceRef: 'N9-RCE30-00003',
       timeline: [
         {
           tick: 0,
@@ -290,26 +295,27 @@ describe('raceRoutes endpoints', () => {
     })
   })
 
-  it('GET /race/timeline/:raceId falls back to stored artifact', async () => {
-    vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue(null)
+  it('GET /race/timeline/:raceRef falls back to stored artifact', async () => {
+    vi.spyOn(RaceState, 'findPrecomputedByRef').mockReturnValue(null)
     raceReadServiceMock.getTimeline.mockResolvedValue([
       { tick: 1, events: [{ id: 'db-event', instanceId: 'evt-1' }] },
     ])
 
-    const res = await request(makeApp()).get('/race/timeline/race-db-4')
+    const res = await request(makeApp()).get('/race/timeline/N9-DB400-00004')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
+      raceRef: 'N9-DB400-00004',
       timeline: [
         { tick: 1, events: [{ id: 'db-event', instanceId: 'evt-1' }] },
       ],
     })
   })
 
-  it('GET /race/results/:raceId returns outcome info', async () => {
-    vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue({
-      id: 'race-4',
+  it('GET /race/results/:raceRef returns outcome info', async () => {
+    vi.spyOn(RaceState, 'findPrecomputedByRef').mockReturnValue({
+      raceRef: 'N9-RCE40-00004',
       authoritativeFinish: {
-        raceId: 'race-4',
+        raceRef: 'N9-RCE40-00004',
         timestampUtc: '2026-03-31T12:00:20.000Z',
         winnerId: 'h1',
         finishOrder: ['h1', 'h2'],
@@ -325,10 +331,10 @@ describe('raceRoutes endpoints', () => {
       finishTimesMs: { h1: 100, h2: 120 },
     } as any)
 
-    const res = await request(makeApp()).get('/race/results/race-4')
+    const res = await request(makeApp()).get('/race/results/N9-RCE40-00004')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
-      raceId: 'race-4',
+      raceRef: 'N9-RCE40-00004',
       timestampUtc: '2026-03-31T12:00:20.000Z',
       winnerId: 'h1',
       finishOrder: ['h1', 'h2'],
@@ -343,10 +349,10 @@ describe('raceRoutes endpoints', () => {
     })
   })
 
-  it('GET /race/results/:raceId falls back to read service when memory is empty', async () => {
-    vi.spyOn(RaceState, 'findPrecomputedById').mockReturnValue(null)
+  it('GET /race/results/:raceRef falls back to read service when memory is empty', async () => {
+    vi.spyOn(RaceState, 'findPrecomputedByRef').mockReturnValue(null)
     raceReadServiceMock.getRaceResults.mockResolvedValue({
-      raceId: 'race-db-5',
+      raceRef: 'N9-DB500-00005',
       timestampUtc: '2026-03-31T12:00:20.000Z',
       winnerId: 'horse-2',
       finishOrder: ['horse-2', 'horse-5'],
@@ -360,10 +366,10 @@ describe('raceRoutes endpoints', () => {
       placements: ['horse-2', 'horse-5'],
     })
 
-    const res = await request(makeApp()).get('/race/results/race-db-5')
+    const res = await request(makeApp()).get('/race/results/N9-DB500-00005')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
-      raceId: 'race-db-5',
+      raceRef: 'N9-DB500-00005',
       timestampUtc: '2026-03-31T12:00:20.000Z',
       winnerId: 'horse-2',
       finishOrder: ['horse-2', 'horse-5'],
@@ -381,14 +387,14 @@ describe('raceRoutes endpoints', () => {
   it('GET /race/history falls back to read service when memory history is empty', async () => {
     vi.spyOn(RaceState, 'getHistory').mockReturnValue([] as any)
     raceReadServiceMock.getRaceHistory.mockResolvedValue([
-      { raceId: 'race-db-6', winnerId: 'horse-1' },
+      { raceRef: 'race-db-6', winnerId: 'horse-1' },
     ])
 
     const res = await request(makeApp()).get('/race/history')
     expect(res.status).toBe(200)
     expect(res.body).toEqual([
       {
-        raceId: 'race-db-6',
+        raceRef: 'race-db-6',
         winnerId: 'horse-1',
         finishOrder: [],
         finishTimesMs: {},
@@ -399,14 +405,14 @@ describe('raceRoutes endpoints', () => {
   it('GET /race/previous falls back to read service when memory is empty', async () => {
     vi.spyOn(RaceState, 'getPreviousRace').mockReturnValue(null)
     raceReadServiceMock.getPreviousRaceSummary.mockResolvedValue({
-      raceId: 'race-db-7',
+      raceRef: 'race-db-7',
       winnerId: 'horse-8',
     })
 
     const res = await request(makeApp()).get('/race/previous')
     expect(res.status).toBe(200)
     expect(res.body).toEqual({
-      raceId: 'race-db-7',
+      raceRef: 'race-db-7',
       winnerId: 'horse-8',
       finishOrder: [],
       finishTimesMs: {},

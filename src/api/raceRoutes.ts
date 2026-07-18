@@ -25,7 +25,7 @@ function respondWithFinishPayload(
     ? payload.finishOrder
     : []
   return res.json({
-    raceId: payload.raceId,
+    raceRef: payload.raceRef,
     timestampUtc: payload.timestampUtc,
     winnerId: payload.winnerId,
     finishOrder,
@@ -52,8 +52,7 @@ function sanitizeRaceConfig(config: unknown) {
 }
 
 function publicRaceSummary(race: {
-  id?: string
-  raceId?: string
+  raceRef?: string | null
   config?: unknown
   finishLine?: unknown
   startTime?: unknown
@@ -65,10 +64,9 @@ function publicRaceSummary(race: {
   lifecycleStatus?: unknown
   persistenceStatus?: unknown
 }) {
-  const raceId = race.raceId ?? race.id
   const isComplete = Boolean(race.endTime) || Boolean(race.winnerId)
   const summary: Record<string, unknown> = {
-    raceId,
+    raceRef: race.raceRef ?? null,
   }
 
   if (race.config !== undefined) summary.config = sanitizeRaceConfig(race.config)
@@ -95,19 +93,19 @@ function publicRaceSummary(race: {
   return summary
 }
 
-function isPublicArtifactAvailable(raceId: string): boolean {
+function isPublicArtifactAvailable(raceRef: string): boolean {
   const current = RaceState.getPrecomputedRace()
-  if (!current || current.id !== raceId) return true
+  if (!current || current.raceRef !== raceRef.toUpperCase()) return true
   if (current.endTime || current.authoritativeFinish) return true
   const { phase } = RaceState.getStateMachine().getPhaseAndSecond()
   return phase === 'race_finished' || phase === 'results_showing'
 }
 
 function rejectIfArtifactUnavailable(
-  raceId: string,
+  raceRef: string,
   res: Response,
 ): boolean {
-  if (isPublicArtifactAvailable(raceId)) return false
+  if (isPublicArtifactAvailable(raceRef)) return false
   res
     .status(403)
     .json({ error: 'race artifact unavailable until race completion' })
@@ -121,7 +119,7 @@ router.get('/current', requireApiToken, async (req, res) => {
   const pre = RaceState.getPrecomputedRace()
   if (pre) {
     return res.json({
-      raceId: pre.id,
+      raceRef: pre.raceRef,
       config: sanitizeRaceConfig(pre.config),
       finishLine: pre.finishLine,
       startTime: pre.startTime,
@@ -157,43 +155,43 @@ router.get('/history', requireApiToken, async (req, res) => {
   return res.json(fallback.map(publicRaceSummary))
 })
 
-router.get('/ticks/:raceId', requireApiToken, async (req, res) => {
-  const { raceId } = req.params
-  if (rejectIfArtifactUnavailable(raceId, res)) return
-  const pre = RaceState.findPrecomputedById(raceId)
-  if (pre) return res.json({ ticks: pre.ticks })
-  const ticks = await raceReadService.getRawTicks(raceId)
+router.get('/ticks/:raceRef', requireApiToken, async (req, res) => {
+  const { raceRef } = req.params
+  if (rejectIfArtifactUnavailable(raceRef, res)) return
+  const pre = RaceState.findPrecomputedByRef(raceRef)
+  if (pre) return res.json({ raceRef: pre.raceRef, ticks: pre.ticks })
+  const ticks = await raceReadService.getRawTicks(raceRef)
   if (!ticks) return res.status(404).json({ error: 'Race not found' })
-  return res.json({ ticks })
+  return res.json({ raceRef: raceRef.toUpperCase(), ticks })
 })
 
 /**
- * GET /race/ticks-final/:raceId - Canonical positions per tick from final matrix
+ * GET /race/ticks-final/:raceRef - Canonical positions per tick from final matrix
  */
-router.get('/ticks-final/:raceId', requireApiToken, async (req, res) => {
-  const { raceId } = req.params
-  if (rejectIfArtifactUnavailable(raceId, res)) return
-  const pre = RaceState.findPrecomputedById(raceId)
+router.get('/ticks-final/:raceRef', requireApiToken, async (req, res) => {
+  const { raceRef } = req.params
+  if (rejectIfArtifactUnavailable(raceRef, res)) return
+  const pre = RaceState.findPrecomputedByRef(raceRef)
   if (pre?.finalHorseStateMatrix) {
     const out = pre.finalHorseStateMatrix.map((states, i) => ({
       tickIndex: i,
       positions: states.map((s) => s.position),
     }))
-    return res.json({ ticksFinal: out })
+    return res.json({ raceRef: pre.raceRef, ticksFinal: out })
   }
 
-  const out = await raceReadService.getFinalTicks(raceId)
+  const out = await raceReadService.getFinalTicks(raceRef)
   if (!out) return res.status(404).json({ error: 'Race not found' })
-  return res.json({ ticksFinal: out })
+  return res.json({ raceRef: raceRef.toUpperCase(), ticksFinal: out })
 })
 
 /**
- * GET /race/timeline/:raceId - Compact event timeline
+ * GET /race/timeline/:raceRef - Compact event timeline
  */
-router.get('/timeline/:raceId', requireApiToken, async (req, res) => {
-  const { raceId } = req.params
-  if (rejectIfArtifactUnavailable(raceId, res)) return
-  const pre = RaceState.findPrecomputedById(raceId)
+router.get('/timeline/:raceRef', requireApiToken, async (req, res) => {
+  const { raceRef } = req.params
+  if (rejectIfArtifactUnavailable(raceRef, res)) return
+  const pre = RaceState.findPrecomputedByRef(raceRef)
   if (pre?.eventTimeline) {
     const out: Array<{
       tick: number
@@ -206,25 +204,25 @@ router.get('/timeline/:raceId', requireApiToken, async (req, res) => {
       })
     }
     out.sort((a, b) => a.tick - b.tick)
-    return res.json({ timeline: out })
+    return res.json({ raceRef: pre.raceRef, timeline: out })
   }
 
-  const out = await raceReadService.getTimeline(raceId)
+  const out = await raceReadService.getTimeline(raceRef)
   if (!out) return res.status(404).json({ error: 'Race not found' })
-  return res.json({ timeline: out })
+  return res.json({ raceRef: raceRef.toUpperCase(), timeline: out })
 })
 
-router.get('/results/:raceId', requireApiToken, async (req, res) => {
-  const { raceId } = req.params
-  if (rejectIfArtifactUnavailable(raceId, res)) return
-  const pre = RaceState.findPrecomputedById(raceId)
+router.get('/results/:raceRef', requireApiToken, async (req, res) => {
+  const { raceRef } = req.params
+  if (rejectIfArtifactUnavailable(raceRef, res)) return
+  const pre = RaceState.findPrecomputedByRef(raceRef)
   if (pre?.authoritativeFinish) {
     return respondWithFinishPayload(res, pre.authoritativeFinish)
   }
 
   if (pre) {
     return respondWithFinishPayload(res, {
-      raceId: pre.id,
+      raceRef: pre.raceRef,
       timestampUtc: pre.endTime?.toISOString() ?? '',
       winnerId: pre.winnerId,
       finishOrder: pre.finishOrder,
@@ -233,7 +231,7 @@ router.get('/results/:raceId', requireApiToken, async (req, res) => {
     })
   }
 
-  const fallback = await raceReadService.getRaceResults(raceId)
+  const fallback = await raceReadService.getRaceResults(raceRef)
   if (!fallback) return res.status(404).json({ error: 'Race not found' })
   return res.json(fallback)
 })
@@ -246,6 +244,7 @@ router.get('/config', requireApiToken, (req, res) => {
     const pubKey = getPublicKey()
     const keyId = getPublicKeyId()
     res.json({
+      protoVer: 2,
       keyId,
       publicKey: pubKey,
       keyframeIntervalTicks: Number(process.env.KEYFRAME_INTERVAL_TICKS || 20),

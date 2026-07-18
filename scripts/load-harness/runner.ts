@@ -66,22 +66,22 @@ export async function runLoadHarness(
 
   const handleRaceFinish = (event: {
     clientId: string
-    raceId: string
+    raceRef: string
     winnerId: string
     finishOrder: ReadonlyArray<string>
   }) => {
-    const aggregate = raceAggregates.get(event.raceId) ?? {
+    const aggregate = raceAggregates.get(event.raceRef) ?? {
       clientsFinished: 0,
       resultsValidated: 0,
       mismatches: 0,
     }
     aggregate.clientsFinished++
-    raceAggregates.set(event.raceId, aggregate)
+    raceAggregates.set(event.raceRef, aggregate)
 
-    if (!pendingRaceValidations.has(`${event.raceId}:${event.clientId}`)) {
+    if (!pendingRaceValidations.has(`${event.raceRef}:${event.clientId}`)) {
       const task = (async () => {
         try {
-          const result = await oracle.getRaceResult(event.raceId)
+          const result = await oracle.getRaceResult(event.raceRef)
           aggregate.resultsValidated++
           if (
             result.winnerId !== event.winnerId ||
@@ -92,7 +92,7 @@ export async function runLoadHarness(
               timestamp: new Date().toISOString(),
               type: 'result-mismatch',
               clientId: event.clientId,
-              raceId: event.raceId,
+              raceRef: event.raceRef,
               detail: {
                 observedWinnerId: event.winnerId,
                 expectedWinnerId: result.winnerId,
@@ -106,7 +106,7 @@ export async function runLoadHarness(
             timestamp: new Date().toISOString(),
             type: 'api-error',
             clientId: event.clientId,
-            raceId: event.raceId,
+            raceRef: event.raceRef,
             detail: {
               stage: 'result-validation',
               message: error instanceof Error ? error.message : String(error),
@@ -114,7 +114,7 @@ export async function runLoadHarness(
           })
         }
       })()
-      pendingRaceValidations.set(`${event.raceId}:${event.clientId}`, task)
+      pendingRaceValidations.set(`${event.raceRef}:${event.clientId}`, task)
     }
   }
 
@@ -412,13 +412,13 @@ function buildFinalSummary(
       syncCount: client.syncCount,
       syncLatencyAvgMs: client.syncLatencyAvgMs,
       syncLatencyP95Ms: client.syncLatencyP95Ms,
-      lastRaceId: client.lastRaceId,
+      lastRaceRef: client.lastRaceRef,
       lastSeq: client.lastSeq,
     }))
 
   const perRace = Array.from(raceAggregates.entries()).map(
-    ([raceId, race]) => ({
-      raceId,
+    ([raceRef, race]) => ({
+      raceRef,
       clientsFinished: race.clientsFinished,
       resultsValidated: race.resultsValidated,
       mismatches: race.mismatches,

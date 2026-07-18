@@ -17,15 +17,15 @@ export class RaceResultOracle {
 
   constructor(private readonly apiBaseUrl: string) {}
 
-  async getRaceResult(raceId: string): Promise<RaceResultRecord> {
-    const cached = this.resultCache.get(raceId)
+  async getRaceResult(raceRef: string): Promise<RaceResultRecord> {
+    const cached = this.resultCache.get(raceRef)
     if (cached) return cached
 
     let lastError: unknown = null
     for (let attempt = 0; attempt < 10; attempt++) {
       try {
         const response = await fetch(
-          `${this.apiBaseUrl}/race/results/${raceId}`,
+          `${this.apiBaseUrl}/race/results/${raceRef}`,
         )
         if (!response.ok) {
           lastError = new Error(`HTTP ${response.status}`)
@@ -43,7 +43,7 @@ export class RaceResultOracle {
             ]),
           })
           if (result.winnerId && result.finishOrder.length > 0) {
-            this.resultCache.set(raceId, result)
+            this.resultCache.set(raceRef, result)
             return result
           }
           lastError = new Error('race result missing winner or finish order')
@@ -56,7 +56,7 @@ export class RaceResultOracle {
 
     throw lastError instanceof Error
       ? lastError
-      : new Error(`unable to load results for ${raceId}`)
+      : new Error(`unable to load results for ${raceRef}`)
   }
 
   async getServerMetrics(): Promise<ServerMetricsSnapshot> {

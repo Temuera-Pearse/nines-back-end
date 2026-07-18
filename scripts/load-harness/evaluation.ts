@@ -44,7 +44,7 @@ const INVESTIGATION_GUIDE: Readonly<Record<string, string>> = {
   cpu_stability:
     'Inspect server tick CPU timing, fanout cost, and any synchronous serialization hot spots.',
   result_mismatches:
-    'Inspect finish event generation against persisted race results and any race ID drift.',
+    'Inspect finish event generation against persisted race results and any race reference drift.',
 }
 
 export function evaluateOperationalVerdict(

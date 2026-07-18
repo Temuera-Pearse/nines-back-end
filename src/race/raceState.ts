@@ -17,7 +17,7 @@ type TickSummary = {
 }
 
 type PrecomputeSummaryArgs = {
-  raceId: string
+  raceRef: string
   tickCount: number
   first3: TickSummary[]
   last3: TickSummary[]
@@ -25,7 +25,7 @@ type PrecomputeSummaryArgs = {
 }
 
 type RaceScheduleArgs = {
-  raceId: string
+  raceRef: string
   trackLength: number
   finishLine: number
   durationMs: number
@@ -33,32 +33,32 @@ type RaceScheduleArgs = {
   winnerId?: string | null
 }
 
-type CountdownArgs = { raceId: string; tMinusSec: number }
-type RaceStartArgs = { raceId: string; timestamp: string }
-type RaceFinishArgs = { raceId: string; timestamp: string; winnerId: string }
-type RaceArchiveArgs = { raceId: string; durationMs: number }
+type CountdownArgs = { raceRef: string; tMinusSec: number }
+type RaceStartArgs = { raceRef: string; timestamp: string }
+type RaceFinishArgs = { raceRef: string; timestamp: string; winnerId: string }
+type RaceArchiveArgs = { raceRef: string; durationMs: number }
 
 type TickStreamArgs = {
-  raceId: string
+  raceRef: string
   tick: TickSummary
   broadcastCount: number
 }
-type TickSkippedArgs = { raceId: string; skippedCount: number; reason?: string }
+type TickSkippedArgs = { raceRef: string; skippedCount: number; reason?: string }
 type DebugVelocityArgs = {
-  raceId: string
+  raceRef: string
   tickIndex: number
   velocities: { horseId: string; velocity: number }[]
 }
-type DebugSeedArgs = { raceId: string }
+type DebugSeedArgs = { raceRef: string }
 type DebugDriftArgs = {
-  raceId: string
+  raceRef: string
   tickIndex: number
   driftMs: number
   correctionAppliedMs: number
 }
 
-const fmt = (category: string, raceId?: string) =>
-  `[${ts()}][${category}]${raceId ? `[${raceId}]` : ''}`
+const fmt = (category: string, raceRef?: string) =>
+  `[${ts()}][${category}]${raceRef ? `[${raceRef}]` : ''}`
 
 const isDev =
   process.env.NODE_ENV === 'development' ||
@@ -78,7 +78,7 @@ export const Log = {
   },
   raceScheduled(args: RaceScheduleArgs) {
     const {
-      raceId,
+      raceRef,
       trackLength,
       finishLine,
       durationMs,
@@ -86,7 +86,7 @@ export const Log = {
       winnerId,
     } = args
     console.log(
-      `${fmt('RACE', raceId)} Scheduled/seeded ` +
+      `${fmt('RACE', raceRef)} Scheduled/seeded ` +
         JSON.stringify({
           trackLength,
           finishLine,
@@ -96,20 +96,20 @@ export const Log = {
         }),
     )
   },
-  countdown({ raceId, tMinusSec }: CountdownArgs) {
-    console.log(`${fmt('COUNTDOWN', raceId)} T-${tMinusSec}s`)
+  countdown({ raceRef, tMinusSec }: CountdownArgs) {
+    console.log(`${fmt('COUNTDOWN', raceRef)} T-${tMinusSec}s`)
   },
-  raceStart({ raceId, timestamp }: RaceStartArgs) {
-    console.log(`${fmt('START', raceId)} at ${timestamp}`)
+  raceStart({ raceRef, timestamp }: RaceStartArgs) {
+    console.log(`${fmt('START', raceRef)} at ${timestamp}`)
   },
-  raceFinish({ raceId, timestamp, winnerId }: RaceFinishArgs) {
-    console.log(`${fmt('FINISH', raceId)} at ${timestamp} winner=${winnerId}`)
+  raceFinish({ raceRef, timestamp, winnerId }: RaceFinishArgs) {
+    console.log(`${fmt('FINISH', raceRef)} at ${timestamp} winner=${winnerId}`)
   },
-  raceArchive({ raceId, durationMs }: RaceArchiveArgs) {
-    console.log(`${fmt('ARCHIVE', raceId)} durationMs=${durationMs}`)
+  raceArchive({ raceRef, durationMs }: RaceArchiveArgs) {
+    console.log(`${fmt('ARCHIVE', raceRef)} durationMs=${durationMs}`)
   },
   precomputeSummary({
-    raceId,
+    raceRef,
     tickCount,
     first3,
     last3,
@@ -118,7 +118,7 @@ export const Log = {
     console.log(
       `${fmt(
         'PRECOMPUTE',
-        raceId,
+        raceRef,
       )} tickCount=${tickCount} projectedWinner=${projectedWinnerId}`,
     )
     const serializeTick = (t: TickSummary) => ({
@@ -127,17 +127,17 @@ export const Log = {
       horses: t.horses.map((h) => `${h.horseId}:${h.distance}`),
     })
     console.log(
-      `${fmt('PRECOMPUTE', raceId)} first3=` +
+      `${fmt('PRECOMPUTE', raceRef)} first3=` +
         JSON.stringify(first3.map(serializeTick)),
     )
     console.log(
-      `${fmt('PRECOMPUTE', raceId)} last3=` +
+      `${fmt('PRECOMPUTE', raceRef)} last3=` +
         JSON.stringify(last3.map(serializeTick)),
     )
   },
-  tickStream({ raceId, tick, broadcastCount }: TickStreamArgs) {
+  tickStream({ raceRef, tick, broadcastCount }: TickStreamArgs) {
     console.log(
-      `${fmt('TICK', raceId)} idx=${tick.index} elapsedMs=${
+      `${fmt('TICK', raceRef)} idx=${tick.index} elapsedMs=${
         tick.elapsedMs
       } offsetMs=${tick.timestampOffsetMs} ` +
         `horses=` +
@@ -145,31 +145,31 @@ export const Log = {
         ` broadcast=${broadcastCount}`,
     )
   },
-  tickSkipped({ raceId, skippedCount, reason }: TickSkippedArgs) {
+  tickSkipped({ raceRef, skippedCount, reason }: TickSkippedArgs) {
     console.log(
-      `${fmt('TICK-SKIP', raceId)} count=${skippedCount}` +
+      `${fmt('TICK-SKIP', raceRef)} count=${skippedCount}` +
         (reason ? ` reason=${reason}` : ''),
     )
   },
-  broadcastInfo(raceId: string, count: number) {
-    console.log(`${fmt('WS', raceId)} broadcast=${count}`)
+  broadcastInfo(raceRef: string, count: number) {
+    console.log(`${fmt('WS', raceRef)} broadcast=${count}`)
   },
   // Debug-only logs
-  debugVelocity({ raceId, tickIndex, velocities }: DebugVelocityArgs) {
+  debugVelocity({ raceRef, tickIndex, velocities }: DebugVelocityArgs) {
     if (!isDev) return
     console.log(
-      `${fmt('DEBUG-VEL', raceId)} idx=${tickIndex} ` +
+      `${fmt('DEBUG-VEL', raceRef)} idx=${tickIndex} ` +
         JSON.stringify(
           velocities.map((v) => ({ h: v.horseId, vel: v.velocity })),
         ),
     )
   },
-  debugSeed({ raceId }: DebugSeedArgs) {
+  debugSeed({ raceRef }: DebugSeedArgs) {
     if (!isDev) return
-    console.log(`${fmt('DEBUG-SEED', raceId)} private seed initialized`)
+    console.log(`${fmt('DEBUG-SEED', raceRef)} private seed initialized`)
   },
   debugDrift({
-    raceId,
+    raceRef,
     tickIndex,
     driftMs,
     correctionAppliedMs,
@@ -178,7 +178,7 @@ export const Log = {
     console.log(
       `${fmt(
         'DEBUG-DRIFT',
-        raceId,
+        raceRef,
       )} idx=${tickIndex} driftMs=${driftMs} correctionMs=${correctionAppliedMs}`,
     )
   },
@@ -228,7 +228,7 @@ export class RaceState {
     if (seed) {
       // Compute 32-bit int for RNG determinism
       this.currentSeedInt = hashStringToInt(seed)
-      Log.debugSeed({ raceId: this.precomputed?.id ?? 'pending' })
+      Log.debugSeed({ raceRef: this.precomputed?.raceRef ?? 'pending' })
     } else {
       this.currentSeedInt = null
     }
@@ -259,7 +259,7 @@ export class RaceState {
   static completeRace(): void {
     if (this.precomputed) {
       Log.raceArchive({
-        raceId: this.precomputed.id,
+        raceRef: this.precomputed.raceRef,
         durationMs:
           // prefer explicit durationMs on precomputed, fall back to dt * ticks, or ticks length
           (this.precomputed as any).durationMs ??
@@ -296,9 +296,16 @@ export class RaceState {
   /**
    * Find a race by ID
    */
-  static findPrecomputedById(id: string): PrecomputedRace | null {
-    if (this.precomputed?.id === id) return this.precomputed
-    if (this.previousRace?.id === id) return this.previousRace
-    return this.history.find((r) => r.id === id) || null
+  static findPrecomputedById(raceId: string): PrecomputedRace | null {
+    if (this.precomputed?.raceId === raceId) return this.precomputed
+    if (this.previousRace?.raceId === raceId) return this.previousRace
+    return this.history.find((race) => race.raceId === raceId) || null
+  }
+
+  static findPrecomputedByRef(raceRef: string): PrecomputedRace | null {
+    const normalized = raceRef.toUpperCase()
+    if (this.precomputed?.raceRef === normalized) return this.precomputed
+    if (this.previousRace?.raceRef === normalized) return this.previousRace
+    return this.history.find((race) => race.raceRef === normalized) || null
   }
 }

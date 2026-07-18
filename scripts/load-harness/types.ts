@@ -66,7 +66,7 @@ export type ClientSnapshot = Readonly<{
   syncCount: number
   syncLatencyAvgMs: number
   syncLatencyP95Ms: number
-  lastRaceId: string | null
+  lastRaceRef: string | null
   lastSeq: number | null
 }>
 
@@ -74,7 +74,7 @@ export type HarnessAnomaly = Readonly<{
   timestamp: string
   type: AnomalyType
   clientId: string
-  raceId?: string
+  raceRef?: string
   detail: Readonly<Record<string, unknown>>
 }>
 
@@ -155,7 +155,7 @@ export type ClientSummary = Readonly<{
   syncCount: number
   syncLatencyAvgMs: number
   syncLatencyP95Ms: number
-  lastRaceId: string | null
+  lastRaceRef: string | null
   lastSeq: number | null
 }>
 
@@ -217,7 +217,7 @@ export type FinalSummary = Readonly<{
   firstFailedMetric?: string
   investigateNext?: string
   perRace: ReadonlyArray<{
-    raceId: string
+    raceRef: string
     clientsFinished: number
     resultsValidated: number
     mismatches: number

@@ -162,7 +162,7 @@ export async function getRaceAuthoritySummary() {
       memory: memoryUsage(),
     },
     lifecycle: {
-      currentRaceId: pre?.id ?? currentRace?.id ?? null,
+      currentRaceId: pre?.raceId ?? currentRace?.raceId ?? null,
       state: phase,
       phase,
       nextPhase,
@@ -183,7 +183,7 @@ export async function getRaceAuthoritySummary() {
           ? Math.max(0, 30 - second)
           : null,
       currentRaceConfig: pre?.config ? sanitizeConfig(pre.config) : null,
-      lastCompletedRaceId: lastCompletedRace?.id ?? null,
+      lastCompletedRaceId: lastCompletedRace?.raceId ?? null,
       lastWinnerId: lastCompletedRace?.winnerId ?? null,
     },
     tickHealth: {

@@ -10,7 +10,7 @@ const SAMPLE_LIMIT = 512
 
 type RaceFinishEvent = Readonly<{
   clientId: string
-  raceId: string
+  raceRef: string
   winnerId: string
   finishOrder: ReadonlyArray<string>
 }>
@@ -21,7 +21,7 @@ type ClientCallbacks = Readonly<{
 }>
 
 type SyncRequest = Readonly<{
-  raceId: string
+  raceRef: string
   fromTick?: number
 }>
 
@@ -41,7 +41,7 @@ function almostEqual(a: number, b: number, epsilon = 1e-6): boolean {
 export class SimulatedRaceClient {
   private ws: WebSocket | null = null
   private stopped = false
-  private currentRaceId: string | null = null
+  private currentRaceRef: string | null = null
   private lastSeq: number | null = null
   private lastTickIndex = -1
   private frames = 0
@@ -162,7 +162,7 @@ export class SimulatedRaceClient {
       syncLatencyAvgMs:
         this.syncCount === 0 ? 0 : this.syncLatencyTotalMs / this.syncCount,
       syncLatencyP95Ms: percentile(this.syncLatencySamples, 0.95),
-      lastRaceId: this.currentRaceId,
+      lastRaceRef: this.currentRaceRef,
       lastSeq: this.lastSeq,
     })
   }
@@ -258,11 +258,11 @@ export class SimulatedRaceClient {
         return
       }
       if (message.type === 'race:finish') {
-        const raceId = message.raceId ?? this.currentRaceId
-        if (typeof raceId === 'string') {
+        const raceRef = message.raceRef ?? this.currentRaceRef
+        if (typeof raceRef === 'string') {
           this.callbacks.onRaceFinish({
             clientId: this.clientId,
-            raceId,
+            raceRef,
             winnerId: String(message.winnerId ?? ''),
             finishOrder: Object.freeze([...(message.finishOrder ?? [])]),
           })
@@ -295,7 +295,7 @@ export class SimulatedRaceClient {
     )
     return {
       ...header,
-      raceId: header.raceId ?? this.currentRaceId,
+      raceRef: header.raceRef ?? this.currentRaceRef,
       data: {
         ...(header.data ?? {}),
         positions,
@@ -304,10 +304,10 @@ export class SimulatedRaceClient {
   }
 
   private handleRaceInfo(message: any): void {
-    const raceId = typeof message.raceId === 'string' ? message.raceId : null
-    if (!raceId) return
-    if (this.currentRaceId !== raceId) {
-      this.currentRaceId = raceId
+    const raceRef = typeof message.raceRef === 'string' ? message.raceRef : null
+    if (!raceRef) return
+    if (this.currentRaceRef !== raceRef) {
+      this.currentRaceRef = raceRef
       this.lastSeq = null
       this.lastTickIndex = -1
       this.lastPositions = null
@@ -324,8 +324,8 @@ export class SimulatedRaceClient {
     ) {
       const request: SyncRequest =
         this.lastTickIndex >= 0
-          ? { raceId, fromTick: this.lastTickIndex + 1 }
-          : { raceId }
+          ? { raceRef, fromTick: this.lastTickIndex + 1 }
+          : { raceRef }
       this.requestSync(request)
     }
   }
@@ -336,7 +336,7 @@ export class SimulatedRaceClient {
     this.ws.send(
       JSON.stringify({
         type: 'sync:request',
-        raceId: request.raceId,
+        raceRef: request.raceRef,
         ...(typeof request.fromTick === 'number'
           ? { fromTick: request.fromTick }
           : {}),
@@ -347,7 +347,7 @@ export class SimulatedRaceClient {
     setTimeout(() => {
       if (this.pendingSyncStartedAt !== requestedAt) return
       this.emitAnomaly('sync-timeout', {
-        raceId: request.raceId,
+        raceRef: request.raceRef,
         timeoutMs: this.config.reconnectSyncTimeoutMs,
       })
     }, this.config.reconnectSyncTimeoutMs)
@@ -372,11 +372,11 @@ export class SimulatedRaceClient {
   }
 
   private processTickLikeMessage(message: any, fromCatchup: boolean): void {
-    const raceId =
-      typeof message.raceId === 'string' ? message.raceId : this.currentRaceId
-    if (!raceId) return
-    if (this.currentRaceId !== raceId) {
-      this.currentRaceId = raceId
+    const raceRef =
+      typeof message.raceRef === 'string' ? message.raceRef : this.currentRaceRef
+    if (!raceRef) return
+    if (this.currentRaceRef !== raceRef) {
+      this.currentRaceRef = raceRef
       this.lastSeq = null
       this.lastTickIndex = -1
       this.lastPositions = null
@@ -414,7 +414,7 @@ export class SimulatedRaceClient {
       if (seq <= this.lastSeq) {
         this.seqRegressions++
         this.emitAnomaly('seq-regression', {
-          raceId,
+          raceRef,
           prevSeq: this.lastSeq,
           nextSeq: seq,
           fromCatchup,
@@ -424,7 +424,7 @@ export class SimulatedRaceClient {
         this.seqGaps++
         this.seqGapFrames += missing
         this.emitAnomaly('seq-gap', {
-          raceId,
+          raceRef,
           prevSeq: this.lastSeq,
           nextSeq: seq,
           missing,
@@ -473,7 +473,7 @@ export class SimulatedRaceClient {
         )
         if (mismatch) {
           this.emitAnomaly('delta-mismatch', {
-            raceId: this.currentRaceId ?? undefined,
+            raceRef: this.currentRaceRef ?? undefined,
             positionsLength: positions.length,
             deltasLength: deltas.length,
           })
@@ -494,10 +494,10 @@ export class SimulatedRaceClient {
       timestamp: new Date().toISOString(),
       type,
       clientId: this.clientId,
-      raceId:
-        typeof detail.raceId === 'string'
-          ? detail.raceId
-          : (this.currentRaceId ?? undefined),
+      raceRef:
+        typeof detail.raceRef === 'string'
+          ? detail.raceRef
+          : (this.currentRaceRef ?? undefined),
       detail,
     })
   }

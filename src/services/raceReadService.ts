@@ -22,8 +22,9 @@ type SummaryArtifact = {
 
 function normalizeFinishPayload(
   payload: Partial<RaceFinishPayload> | null | undefined,
+  raceRef: string,
 ): Record<string, unknown> | null {
-  if (!payload?.raceId || !payload.winnerId) return null
+  if (!payload?.winnerId) return null
 
   const finishOrder = Array.isArray(payload.finishOrder)
     ? payload.finishOrder.filter(
@@ -59,7 +60,7 @@ function normalizeFinishPayload(
         }
 
   return {
-    raceId: payload.raceId,
+    raceRef,
     timestampUtc:
       typeof payload.timestampUtc === 'string' ? payload.timestampUtc : '',
     winnerId: payload.winnerId,
@@ -76,7 +77,9 @@ function mapRaceRecordToSummary(record: RaceRecord) {
   const trackLength = Number(record.config.trackLength ?? 0)
   const finishRatio = Number(record.config.finishRatio ?? 1)
   return {
-    raceId: record.raceId,
+    // Legacy records deliberately retain null rather than receiving a generated
+    // identity during reads, which would make their public identity unstable.
+    raceRef: record.raceRef,
     config: record.config,
     finishLine:
       Number.isFinite(trackLength) && Number.isFinite(finishRatio)
@@ -97,12 +100,12 @@ export interface RaceReadService {
   getCurrentRaceSummary(): Promise<Record<string, unknown> | null>
   getPreviousRaceSummary(): Promise<Record<string, unknown> | null>
   getRaceHistory(limit: number): Promise<Record<string, unknown>[]>
-  getRaceResults(raceId: string): Promise<Record<string, unknown> | null>
-  getTimeline(raceId: string): Promise<TimelineArtifact | null>
+  getRaceResults(raceRef: string): Promise<Record<string, unknown> | null>
+  getTimeline(raceRef: string): Promise<TimelineArtifact | null>
   getFinalTicks(
-    raceId: string,
+    raceRef: string,
   ): Promise<Array<{ tickIndex: number; positions: number[] }> | null>
-  getRawTicks(raceId: string): Promise<unknown[] | null>
+  getRawTicks(raceRef: string): Promise<unknown[] | null>
 }
 
 export class DefaultRaceReadService implements RaceReadService {
@@ -126,21 +129,24 @@ export class DefaultRaceReadService implements RaceReadService {
   }
 
   async getRaceResults(
-    raceId: string,
+    raceRef: string,
   ): Promise<Record<string, unknown> | null> {
-    const summaryArtifact = await this.findArtifact(raceId, 'summary')
+    const record = await this.raceRepository.findRaceByRef(raceRef)
+    if (!record?.raceRef) return null
+    const summaryArtifact = await this.findArtifact(record.raceId, 'summary')
     if (summaryArtifact) {
       const summary = await this.artifactLoader.loadJson<SummaryArtifact>(
         summaryArtifact,
       )
-      const fromSummary = normalizeFinishPayload(summary.authoritativeFinish)
+      const fromSummary = normalizeFinishPayload(
+        summary.authoritativeFinish,
+        record.raceRef,
+      )
       if (fromSummary) return fromSummary
     }
 
-    const record = await this.raceRepository.findRaceById(raceId)
-    if (!record) return null
     return {
-      raceId: record.raceId,
+      raceRef: record.raceRef,
       winnerId: record.winnerId,
       finishOrder: record.finishOrder,
       finishTimesMs: record.finishTimesMs,
@@ -154,8 +160,8 @@ export class DefaultRaceReadService implements RaceReadService {
     }
   }
 
-  async getTimeline(raceId: string): Promise<TimelineArtifact | null> {
-    const pre = RaceState.findPrecomputedById(raceId)
+  async getTimeline(raceRef: string): Promise<TimelineArtifact | null> {
+    const pre = RaceState.findPrecomputedByRef(raceRef)
     if (pre?.eventTimeline) {
       const out: TimelineArtifact = []
       for (const [tickIndex, events] of pre.eventTimeline.entries()) {
@@ -171,15 +177,17 @@ export class DefaultRaceReadService implements RaceReadService {
       return out
     }
 
-    const artifact = await this.findArtifact(raceId, 'event_timeline')
+    const record = await this.raceRepository.findRaceByRef(raceRef)
+    if (!record) return null
+    const artifact = await this.findArtifact(record.raceId, 'event_timeline')
     if (!artifact) return null
     return this.artifactLoader.loadJson<TimelineArtifact>(artifact)
   }
 
   async getFinalTicks(
-    raceId: string,
+    raceRef: string,
   ): Promise<Array<{ tickIndex: number; positions: number[] }> | null> {
-    const pre = RaceState.findPrecomputedById(raceId)
+    const pre = RaceState.findPrecomputedByRef(raceRef)
     if (pre?.finalHorseStateMatrix) {
       return pre.finalHorseStateMatrix.map((states, index) => ({
         tickIndex: index,
@@ -187,7 +195,12 @@ export class DefaultRaceReadService implements RaceReadService {
       }))
     }
 
-    const artifact = await this.findArtifact(raceId, 'final_horse_state_matrix')
+    const record = await this.raceRepository.findRaceByRef(raceRef)
+    if (!record) return null
+    const artifact = await this.findArtifact(
+      record.raceId,
+      'final_horse_state_matrix',
+    )
     if (!artifact) return null
     const matrix =
       await this.artifactLoader.loadJson<FinalTicksArtifact>(artifact)
@@ -197,11 +210,13 @@ export class DefaultRaceReadService implements RaceReadService {
     }))
   }
 
-  async getRawTicks(raceId: string): Promise<unknown[] | null> {
-    const pre = RaceState.findPrecomputedById(raceId)
+  async getRawTicks(raceRef: string): Promise<unknown[] | null> {
+    const pre = RaceState.findPrecomputedByRef(raceRef)
     if (pre?.ticks) return pre.ticks
 
-    const artifact = await this.findArtifact(raceId, 'raw_ticks')
+    const record = await this.raceRepository.findRaceByRef(raceRef)
+    if (!record) return null
+    const artifact = await this.findArtifact(record.raceId, 'raw_ticks')
     if (!artifact) return null
     return this.artifactLoader.loadJson<unknown[]>(artifact)
   }

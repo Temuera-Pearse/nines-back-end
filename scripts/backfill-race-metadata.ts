@@ -6,6 +6,7 @@ import { getRaceArtifactRepository } from '../src/db/raceArtifactRepository.js'
 
 type SummaryFile = {
   raceId: string
+  raceRef?: string
   privateSeed?: string
   // Legacy summaries used this less explicit field name.
   seed?: string
@@ -46,6 +47,9 @@ async function main(): Promise<void> {
 
       await raceRepository.upsertSeededRace({
         raceId: summary.raceId,
+        // Legacy summaries without a reference remain explicitly unaddressable
+        // through public APIs; never mint unstable identities during backfill.
+        raceRef: summary.raceRef ?? null,
         seed: privateSeed,
         checksum: summary.checksum ?? null,
         config: summary.config ?? {},
@@ -107,7 +111,7 @@ async function main(): Promise<void> {
       }
 
       await raceArtifactRepository.upsertArtifacts(artifacts)
-      console.log(`Backfilled ${summary.raceId}`)
+      console.log(`Backfilled ${summary.raceRef ?? 'legacy race'}`)
     } catch (e) {
       console.warn(`Skipping ${entry.name}: ${String(e)}`)
     }

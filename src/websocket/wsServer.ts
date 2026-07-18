@@ -10,7 +10,7 @@ import { performance } from 'perf_hooks'
 import type { PrecomputedRace, RaceWinnerDeclaredPayload } from '../race/raceTypes.js'
 
 const ts = () => new Date().toISOString()
-const PROTO_VER = Number(process.env.PROTO_VER || 1)
+const PROTO_VER = 2
 
 // Catch-up window/rate limit constants
 const MAX_CATCHUP_TICKS = 50
@@ -57,7 +57,7 @@ function buildWinnerDeclaredPayload(
   if (!Number.isFinite(winnerCrossMs)) return null
   const timestampMs = pre.startTime.getTime() + winnerCrossMs
   return {
-    raceId: pre.id,
+    raceRef: pre.raceRef,
     timestampUtc: new Date(timestampMs).toISOString(),
     winnerId: pre.winnerId,
     finishOrder: [...pre.finishOrder],
@@ -107,7 +107,7 @@ function maybeReplayWinnerDeclared(
 }
 
 // Handle sync requests from clients
-function handleSyncRequest(ws: WebSocket, msg: any) {
+export function handleSyncRequest(ws: WebSocket, msg: any) {
   const startedAt = performance.now()
   engineMetrics.recordSyncRequest()
   const now = Date.now()
@@ -119,10 +119,13 @@ function handleSyncRequest(ws: WebSocket, msg: any) {
   }
   lastSyncByClient.set(ws, now)
 
-  const raceId: string | undefined = msg?.raceId
-  if (!raceId || !activeRaces.has(raceId)) {
+  const raceRef =
+    typeof msg?.raceRef === 'string' ? msg.raceRef.toUpperCase() : undefined
+  const pre = raceRef ? RaceState.findPrecomputedByRef(raceRef) : null
+  const raceId = pre?.raceId
+  if (!raceRef || !raceId || !activeRaces.has(raceId)) {
     engineMetrics.recordSyncError()
-    ws.send(JSON.stringify({ type: 'error', message: 'invalid raceId' }))
+    ws.send(JSON.stringify({ type: 'error', message: 'invalid raceRef' }))
     return
   }
   const currentTickIndex = getCurrentTickIndex(raceId)
@@ -144,7 +147,7 @@ function handleSyncRequest(ws: WebSocket, msg: any) {
   const tickFrames = ticksWindow.map((t) => ({
     type: 'race:tick',
     protoVer: PROTO_VER,
-    raceId,
+    raceRef,
     // If seq was captured at broadcast time, use it; otherwise fall back to tickIndex.
     seq: typeof t.seq === 'number' ? t.seq : t.tickIndex,
     tickIndex: t.tickIndex,
@@ -160,7 +163,7 @@ function handleSyncRequest(ws: WebSocket, msg: any) {
     JSON.stringify({
       type: 'race:catchup',
       protoVer: PROTO_VER,
-      raceId,
+      raceRef,
       startIndex,
       ticks: tickFrames,
       currentTickIndex,
@@ -170,11 +173,10 @@ function handleSyncRequest(ws: WebSocket, msg: any) {
     JSON.stringify({
       type: 'race:sync-complete',
       protoVer: PROTO_VER,
-      raceId,
+      raceRef,
       currentTickIndex,
     }),
   )
-  const pre = RaceState.findPrecomputedById(raceId)
   if (pre && !pre.endTime) {
     maybeReplayWinnerDeclared(ws, pre, currentTickIndex)
   }
@@ -237,15 +239,15 @@ export class RaceWebSocketServer {
 
       // On connect: only provide basic race info; client requests catch-up
       const pre = RaceState.getPrecomputedRace()
-      if (pre?.id) {
-        const currentTickIndex = activeRaces.has(pre.id)
-          ? getCurrentTickIndex(pre.id)
+      if (pre?.raceId) {
+        const currentTickIndex = activeRaces.has(pre.raceId)
+          ? getCurrentTickIndex(pre.raceId)
           : -1
         ws.send(
           JSON.stringify({
             type: 'race:info',
             protoVer: PROTO_VER,
-            raceId: pre.id,
+            raceRef: pre.raceRef,
             horseOrder: pre.horses.map((h) => h.id),
             config: sanitizeRaceConfig(pre.config),
             currentTickIndex,
@@ -328,16 +330,13 @@ export class RaceWebSocketServer {
     this.role = role
   }
 
-  static broadcast(message: any): void {
+  static broadcast(message: any, internalRaceId?: string): void {
     const broadcastStartedAt = performance.now()
     const type = message?.type ?? 'unknown'
-    const raceId: string | undefined =
-      message?.raceId ??
-      message?.data?.raceId ??
-      (Array.isArray(message?.data) ? undefined : message?.data?.id)
+    const raceRef: string | undefined = message?.raceRef
     if (LOG_VERBOSE) {
       console.log(
-        `[${ts()}][WS] Broadcast ${type}${raceId ? ` [${raceId}]` : ''} to ${
+        `[${ts()}][WS] Broadcast ${type}${raceRef ? ` [${raceRef}]` : ''} to ${
           this.clients.size
         } clients`,
       )
@@ -349,9 +348,9 @@ export class RaceWebSocketServer {
     const nowMs = Date.now()
     const role = this.role || getLeaderRole()
     const isLeader = role === 'leader'
-    if (isLeader && type === 'race:tick' && raceId) {
-      const currentSeq = (seqByRace.get(raceId) || 0) + 1
-      seqByRace.set(raceId, currentSeq)
+    if (isLeader && type === 'race:tick' && internalRaceId) {
+      const currentSeq = (seqByRace.get(internalRaceId) || 0) + 1
+      seqByRace.set(internalRaceId, currentSeq)
       if (typeof message?.data?.tickIndex === 'number') {
         tickIndex = message.data.tickIndex as number
       }
@@ -361,13 +360,13 @@ export class RaceWebSocketServer {
         tickTs: nowMs,
         protoVer: PROTO_VER,
       }
-      engineMetrics.setLatestSeq(raceId, currentSeq)
+      engineMetrics.setLatestSeq(internalRaceId, currentSeq)
 
       // Capture sequencing for catch-up consumers (best-effort)
       try {
         const positions: number[] | undefined = payloadObj?.data?.positions
         if (typeof tickIndex === 'number' && Array.isArray(positions)) {
-          const rec = activeRaces.get(raceId)
+          const rec = activeRaces.get(internalRaceId)
           if (rec && Array.isArray(rec.ticks) && rec.ticks[tickIndex]) {
             rec.ticks[tickIndex].seq = currentSeq
             rec.ticks[tickIndex].tickTs = nowMs
@@ -375,7 +374,7 @@ export class RaceWebSocketServer {
               rec.currentTickIndex ?? -1,
               tickIndex,
             )
-            activeRaces.set(raceId, rec)
+            activeRaces.set(internalRaceId, rec)
           }
         }
       } catch {
@@ -434,6 +433,7 @@ export class RaceWebSocketServer {
           const header = Buffer.from(
             JSON.stringify({
               type,
+              raceRef,
               seq: payloadObj.seq,
               tickTs: payloadObj.tickTs,
               tickIndex,
@@ -460,26 +460,27 @@ export class RaceWebSocketServer {
         if (
           Array.isArray(positions) &&
           typeof tickIndex === 'number' &&
-          raceId
+          internalRaceId
         ) {
-          const lastKeyTick = lastKeyframeTickByRace.get(raceId) || -Infinity
+          const lastKeyTick =
+            lastKeyframeTickByRace.get(internalRaceId) || -Infinity
           const needKeyframe =
             !Number.isFinite(lastKeyTick) ||
             tickIndex - lastKeyTick >= KEYFRAME_INTERVAL_TICKS
           if (needKeyframe) {
-            lastKeyframeTickByRace.set(raceId, tickIndex)
-            lastPositionsByRace.set(raceId, positions.slice())
+            lastKeyframeTickByRace.set(internalRaceId, tickIndex)
+            lastPositionsByRace.set(internalRaceId, positions.slice())
             const keyframeMsg = { ...payloadObj, type: 'race:keyframe' }
             try {
               client.send(JSON.stringify(keyframeMsg))
             } catch {}
             continue
           } else {
-            const lastPos = lastPositionsByRace.get(raceId)
+            const lastPos = lastPositionsByRace.get(internalRaceId)
             if (Array.isArray(lastPos) && lastPos.length === positions.length) {
               const deltas = positions.map((p, i) => p - lastPos[i])
               // update last positions
-              lastPositionsByRace.set(raceId, positions.slice())
+              lastPositionsByRace.set(internalRaceId, positions.slice())
               const deltaMsg = {
                 ...payloadObj,
                 type: 'race:delta',
@@ -511,12 +512,12 @@ export class RaceWebSocketServer {
     try {
       if (
         isLeader &&
-        raceId &&
+        internalRaceId &&
         (type === 'race:tick' ||
           type === 'race:keyframe' ||
           type === 'race:delta')
       ) {
-        const topic = `race.${raceId}`
+        const topic = `race.${internalRaceId}`
         const publishStartedAt = performance.now()
         getBus()
           .publish(topic, Buffer.from(payloadJson))

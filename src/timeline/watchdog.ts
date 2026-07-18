@@ -23,10 +23,10 @@ export function startWatchdog(): void {
 
     if (pre.startTime && !pre.endTime) {
       // Fallback-only: observe currentTickIndex authority and timers presence.
-      const rec = activeRaces.get(pre.id)
+      const rec = activeRaces.get(pre.raceId)
       if (rec && typeof rec.currentTickIndex === 'number') {
         logEvent('watchdog:tick-observe', {
-          raceId: pre.id,
+          raceRef: pre.raceRef,
           currentTickIndex: rec.currentTickIndex,
         })
       }
@@ -35,13 +35,16 @@ export function startWatchdog(): void {
     // State sanity: running but no timers registered for this race
     if (sm.is('race_running')) {
       const timersForRace = MasterTimeline.getTimerIds().filter((id) =>
-        id.includes(pre.id),
+        id.includes(pre.raceId),
       )
       // We no longer rely on MasterTimeline for the 20Hz engine; the engine uses setTimeout.
       // So the actionable signal is: lifecycle says running, but the engine loop is NOT running.
       if (timersForRace.length === 0 && !isEngineRunning()) {
-        recordWatchdogWarning('Lifecycle is race_running but engine loop is not running', pre.id)
-        logEvent('watchdog:missing-timers', { raceId: pre.id })
+        recordWatchdogWarning(
+          'Lifecycle is race_running but engine loop is not running',
+          pre.raceId,
+        )
+        logEvent('watchdog:missing-timers', { raceRef: pre.raceRef })
         // Scheduler cadence remains; no forced re-schedule to avoid changing timing
       }
     }

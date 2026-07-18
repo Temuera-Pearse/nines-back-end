@@ -61,7 +61,7 @@ function mergeSummaries(
   >()
   for (const summary of summaries) {
     for (const race of summary.perRace) {
-      const current = perRaceMap.get(race.raceId) ?? {
+      const current = perRaceMap.get(race.raceRef) ?? {
         clientsFinished: 0,
         resultsValidated: 0,
         mismatches: 0,
@@ -69,7 +69,7 @@ function mergeSummaries(
       current.clientsFinished += race.clientsFinished
       current.resultsValidated += race.resultsValidated
       current.mismatches += race.mismatches
-      perRaceMap.set(race.raceId, current)
+      perRaceMap.set(race.raceRef, current)
     }
   }
 
@@ -200,8 +200,8 @@ function mergeSummaries(
     firstFailedMetric: undefined,
     investigateNext: undefined,
     perRace: Object.freeze(
-      Array.from(perRaceMap.entries()).map(([raceId, race]) => ({
-        raceId,
+      Array.from(perRaceMap.entries()).map(([raceRef, race]) => ({
+        raceRef,
         ...race,
       })),
     ),

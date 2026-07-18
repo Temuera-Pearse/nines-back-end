@@ -7,6 +7,7 @@ import { getRaceRepository } from '../db/raceRepository.js'
 const raceRepository = getRaceRepository()
 
 export function releaseRace(raceId: string): void {
+  let raceRef: string | null = null
   try {
     // Clear all timers tagged for this raceId
     MasterTimeline.clearAllForRace(raceId)
@@ -14,18 +15,19 @@ export function releaseRace(raceId: string): void {
     activeRaces.delete(raceId)
     // Clear runtime and precomputed references
     const cur = RaceState.getCurrentRace()
-    if (cur?.id === raceId) {
+    if (cur?.raceId === raceId) {
       RaceState.setCurrentRace(null)
     }
     const pre = RaceState.getPrecomputedRace()
-    if (pre?.id === raceId) {
+    raceRef = pre?.raceRef ?? null
+    if (pre?.raceId === raceId) {
       // completeRace() archives to history, updates previousRace, and clears
       // both precomputed and currentRace in one step.
       RaceState.completeRace()
     }
     void raceRepository.markRaceArchived(raceId).catch(() => {})
-    logEvent('cleanup:released', { raceId })
+    logEvent('cleanup:released', { raceRef })
   } catch (e: any) {
-    logEvent('cleanup:error', { raceId, error: e?.message ?? String(e) })
+    logEvent('cleanup:error', { raceRef, error: e?.message ?? String(e) })
   }
 }

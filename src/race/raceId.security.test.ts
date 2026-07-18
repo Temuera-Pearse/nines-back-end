@@ -1,10 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getRaceRepository } from '../db/raceRepository.js'
-import { RaceWebSocketServer } from '../websocket/wsServer.js'
+import {
+  handleSyncRequest,
+  RaceWebSocketServer,
+} from '../websocket/wsServer.js'
 import { activeRaces } from './activeRaceMemory.js'
 import { computeRaceChecksum } from './checksum.js'
-import { createOpaqueRaceId } from './raceId.js'
+import {
+  allocateUniqueRaceRef,
+  createOpaqueRaceId,
+  createRaceRef,
+  resetAllocatedRaceRefsForTests,
+} from './raceId.js'
 import {
   seedPrecomputedRace,
   startPrecomputedRace,
@@ -15,6 +23,7 @@ import { RaceState } from './raceState.js'
 import type { PrecomputedRace } from './raceTypes.js'
 
 const PRIVATE_KEYS = new Set([
+  'raceId',
   'seed',
   'privateSeed',
   'seedInt',
@@ -62,6 +71,7 @@ beforeEach(() => {
   RaceState.clearCurrentSeed()
   RaceState.getStateMachine().state = 'idle'
   activeRaces.clear()
+  resetAllocatedRaceRefsForTests()
 })
 
 afterEach(() => {
@@ -81,12 +91,33 @@ describe('opaque public race identity', () => {
     )
   })
 
+  it('uses a cryptographically random Crockford Base32 public reference', () => {
+    expect(createRaceRef()).toMatch(/^N9-[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$/)
+  })
+
+  it('regenerates a public reference when allocation detects a collision', () => {
+    const candidates = [
+      'N9-7K3M2-Q8D4X',
+      'N9-7K3M2-Q8D4X',
+      'N9-9BCDE-FGHJK',
+    ]
+    const factory = vi.fn(() => candidates.shift()!)
+
+    expect(allocateUniqueRaceRef(factory as any)).toBe('N9-7K3M2-Q8D4X')
+    expect(allocateUniqueRaceRef(factory as any)).toBe('N9-9BCDE-FGHJK')
+    expect(factory).toHaveBeenCalledTimes(3)
+  })
+
   it('keeps race identity independent and stable through retries and lifecycle', async () => {
     const privateSeed = 'horse-count-test'
     const firstId = 'race-00000000-0000-4000-8000-000000000001'
     const secondId = 'race-00000000-0000-4000-8000-000000000002'
+    const firstRef = 'N9-7K3M2-Q8D4X'
+    const secondRef = 'N9-9BCDE-FGHJK'
     const firstIdFactory = vi.fn(() => firstId)
     const secondIdFactory = vi.fn(() => secondId)
+    const firstRefFactory = vi.fn(() => firstRef)
+    const secondRefFactory = vi.fn(() => secondRef)
     const broadcasts: unknown[] = []
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
     vi.spyOn(console, 'warn').mockImplementation(() => {})
@@ -96,7 +127,7 @@ describe('opaque public race identity', () => {
     const repository = getRaceRepository()
     const upsertSpy = vi
       .spyOn(repository, 'upsertSeededRace')
-      .mockResolvedValue(undefined)
+      .mockImplementation(async (input) => input.raceRef)
     const startSpy = vi
       .spyOn(repository, 'markRaceStarted')
       .mockResolvedValue(undefined)
@@ -105,30 +136,43 @@ describe('opaque public race identity', () => {
       .mockResolvedValue(undefined)
 
     RaceState.setCurrentSeed(privateSeed)
-    const first = seedPrecomputedRace(firstIdFactory)
+    const first = seedPrecomputedRace({
+      raceId: firstIdFactory as any,
+      raceRef: firstRefFactory as any,
+    })
     RaceState.setCurrentSeed(privateSeed)
-    const second = seedPrecomputedRace(secondIdFactory)
+    const second = seedPrecomputedRace({
+      raceId: secondIdFactory as any,
+      raceRef: secondRefFactory as any,
+    })
+    await new Promise<void>((resolve) => setImmediate(resolve))
 
-    expect(first.id).toBe(firstId)
-    expect(second.id).toBe(secondId)
+    expect(first.raceId).toBe(firstId)
+    expect(second.raceId).toBe(secondId)
+    expect(first.raceRef).toBe(firstRef)
+    expect(second.raceRef).toBe(secondRef)
     expect(firstIdFactory).toHaveBeenCalledTimes(1)
     expect(secondIdFactory).toHaveBeenCalledTimes(1)
+    expect(firstRefFactory).toHaveBeenCalledTimes(1)
+    expect(secondRefFactory).toHaveBeenCalledTimes(1)
     expect(first.config.seed).toMatch(`${privateSeed}:finish-retry-`)
     expect(second.config.seed).toBe(first.config.seed)
-    expect(publicGenerationArtifacts(second)).toEqual(
-      publicGenerationArtifacts(first),
-    )
+    expect({ ...publicGenerationArtifacts(second), checksum: undefined }).toEqual({
+      ...publicGenerationArtifacts(first),
+      checksum: undefined,
+    })
+    expect(second.checksum).not.toBe(first.checksum)
 
     for (const internalSeed of [privateSeed, second.config.seed]) {
       const seedInt = hashStringToInt(internalSeed)
-      expect(second.id).not.toContain(seedInt.toString(10))
-      expect(second.id).not.toContain(seedInt.toString(16))
-      expect(second.id).not.toContain(seedInt.toString(16).padStart(8, '0'))
+      expect(second.raceRef).not.toContain(seedInt.toString(10))
+      expect(second.raceRef).not.toContain(seedInt.toString(16))
+      expect(second.raceId).not.toContain(seedInt.toString(10))
     }
 
     const checksumWithoutPrivateMetadata = computeRaceChecksum({
       ...second,
-      id: 'race-another-public-id',
+      raceId: 'race-another-private-id',
       config: { ...second.config, seed: 'different-private-seed' },
       seedInt: 123,
       horses: second.horses.map((horse) => ({
@@ -140,15 +184,38 @@ describe('opaque public race identity', () => {
 
     RaceState.setPrecomputedRace(second)
     RaceState.getStateMachine().state = 'countdown'
-    expect(RaceState.getPrecomputedRace()?.id).toBe(secondId)
+    expect(RaceState.getPrecomputedRace()?.raceRef).toBe(secondRef)
     RaceState.getStateMachine().transition('race_starting')
     const startTime = new Date('2026-07-18T00:00:30.000Z')
-    expect(startPrecomputedRace(startTime).id).toBe(secondId)
+    expect(startPrecomputedRace(startTime).raceRef).toBe(secondRef)
+    streamPrecomputedTickAt(5)
+
+    const syncFrames: string[] = []
+    handleSyncRequest(
+      { send: (frame: string) => syncFrames.push(frame) } as any,
+      { type: 'sync:request', raceRef: secondRef, fromTick: 0 },
+    )
+    expect(syncFrames.length).toBeGreaterThan(0)
+    expect(syncFrames.map((frame) => JSON.parse(frame))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'race:sync-complete',
+          raceRef: secondRef,
+        }),
+      ]),
+    )
+    expect(syncFrames.join('')).not.toContain(secondId)
+
+    const rejectedFrames: string[] = []
+    handleSyncRequest(
+      { send: (frame: string) => rejectedFrames.push(frame) } as any,
+      { type: 'sync:request', raceId: secondId },
+    )
+    expect(rejectedFrames.join('')).toContain('invalid raceRef')
     streamPrecomputedTickAt(second.ticks.length - 1)
 
     const scopedMessages = broadcasts.filter((message: any) => {
-      const messageRaceId = message?.raceId ?? message?.data?.raceId
-      return messageRaceId === secondId
+      return message?.raceRef === secondRef
     }) as any[]
     expect(new Set(scopedMessages.map((message) => message.type))).toEqual(
       new Set([
@@ -161,7 +228,7 @@ describe('opaque public race identity', () => {
     )
     expect(
       scopedMessages.every(
-        (message) => (message.raceId ?? message.data?.raceId) === secondId,
+        (message) => message.raceRef === secondRef,
       ),
     ).toBe(true)
 
@@ -172,6 +239,7 @@ describe('opaque public race identity', () => {
     const serializedMessages = JSON.stringify(scopedMessages)
     expect(serializedMessages).not.toContain(privateSeed)
     expect(serializedMessages).not.toContain(second.config.seed)
+    expect(serializedMessages).not.toContain(secondId)
     expect(serializedMessages).not.toContain(
       hashStringToInt(second.config.seed).toString(10),
     )
@@ -180,7 +248,11 @@ describe('opaque public race identity', () => {
     )
 
     expect(upsertSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ raceId: secondId, seed: second.config.seed }),
+      expect.objectContaining({
+        raceId: secondId,
+        raceRef: secondRef,
+        seed: second.config.seed,
+      }),
     )
     const secondUpsert = upsertSpy.mock.calls.find(
       ([input]) => input.raceId === secondId,
@@ -194,5 +266,6 @@ describe('opaque public race identity', () => {
     const ordinaryLogs = JSON.stringify(logSpy.mock.calls)
     expect(ordinaryLogs).not.toContain(privateSeed)
     expect(ordinaryLogs).not.toContain(second.config.seed)
+    expect(ordinaryLogs).not.toContain(secondId)
   })
 })

@@ -29,7 +29,7 @@ Base URL: `http://localhost:3001`
 - `GET /race/current`
 - `GET /race/previous`
 - `GET /race/history`
-- `GET /race/results/:raceId`
+- `GET /race/results/:raceRef`
 - `GET /race/config`
 
 ## Internal Observe-Only Surface
@@ -68,14 +68,22 @@ the runtime setting changes.
 Completed-race artifact endpoints remain available only after the active race is
 complete:
 
-- `GET /race/ticks/:raceId`
-- `GET /race/ticks-final/:raceId`
-- `GET /race/timeline/:raceId`
+- `GET /race/ticks/:raceRef`
+- `GET /race/ticks-final/:raceRef`
+- `GET /race/timeline/:raceRef`
 
 The service no longer exposes `/users`, `/bets`, `/settlements`, general
 `/admin` mutation routes, `/metrics`, or `/race/metrics`.
 
 ## Public Data Safety
+
+Public REST and WebSocket contracts identify races only with `raceRef`, a
+cryptographically random `N9-XXXXX-XXXXX` Crockford Base32 reference. The
+private `raceId` remains an internal persistence/coordination key and is never
+derived from, or exposed alongside, the private deterministic seed. Legacy
+records without a stored `raceRef` remain explicitly unavailable by reference.
+This identity-field change is WebSocket protocol version 2; clients must send
+`raceRef` in `sync:request` and receive `raceRef` on all race messages.
 
 Public race summaries and WebSocket `race:info` messages remove deterministic
 seed data from race config. Full tick, final-matrix, and timeline artifacts are

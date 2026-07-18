@@ -411,7 +411,7 @@ function deterministicInstanceId(
   occ: number
 ): string {
   // Public event identifiers remain deterministic within a race, but must not
-  // encode the private race seed. The raceId scopes these IDs across races.
+  // encode the private race seed. The enclosing raceRef scopes them publicly.
   const key = `${eventId}|${tickIndex}|${occ}`
   const h = hashStringToInt(key) >>> 0
   const hex = h.toString(16).padStart(8, '0')

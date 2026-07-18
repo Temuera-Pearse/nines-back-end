@@ -96,14 +96,14 @@ async function main(): Promise<void> {
   stateMachine.transition('race_starting')
 
   const started = startPrecomputedRace(startTime)
-  await waitForLifecycleStatus(started.id, 'running')
+  await waitForLifecycleStatus(started.raceId, 'running')
 
   for (let index = 0; index < started.ticks.length; index++) {
     streamPrecomputedTickAt(index)
   }
 
-  const persisted = await waitForPersistence(started.id)
-  console.log(`SMOKE_RACE_ID=${started.id}`)
+  const persisted = await waitForPersistence(started.raceId)
+  console.log(`SMOKE_RACE_REF=${started.raceRef}`)
   console.log(
     `SMOKE_RACE_STATUS=${persisted.lifecycleStatus}|${persisted.persistenceStatus}|artifacts=${persisted.artifactCount}`,
   )

@@ -57,9 +57,9 @@ export class RaceClient {
     }
   }
 
-  requestSync(raceId: string, fromTick?: number): void {
+  requestSync(raceRef: string, fromTick?: number): void {
     if (!this.ws) return
-    const msg: any = { type: 'sync:request', raceId }
+    const msg: any = { type: 'sync:request', raceRef }
     if (typeof fromTick === 'number') msg.fromTick = fromTick
     this.ws.send(JSON.stringify(msg))
   }

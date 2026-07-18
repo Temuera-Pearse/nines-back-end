@@ -16,11 +16,15 @@ const raceRepository = new PgRaceRepository()
 const artifactRepository = new PgRaceArtifactRepository()
 
 async function applyMigrations(): Promise<void> {
-  const migrationPath = fileURLToPath(
-    new URL('../../db/migrations/001_alpha_race_metadata.sql', import.meta.url),
-  )
-  const sql = await fs.readFile(migrationPath, 'utf8')
-  await getPool().query(sql)
+  for (const name of [
+    '001_alpha_race_metadata.sql',
+    '002_race_public_reference.sql',
+  ]) {
+    const migrationPath = fileURLToPath(
+      new URL(`../../db/migrations/${name}`, import.meta.url),
+    )
+    await getPool().query(await fs.readFile(migrationPath, 'utf8'))
+  }
 }
 
 describeIfDb('raceReadService integration', () => {
@@ -50,11 +54,14 @@ describeIfDb('raceReadService integration', () => {
   it('reads current and archived races from Postgres and loads artifact fallbacks from disk', async () => {
     const currentRaceId = 'race-current-db'
     const archivedRaceId = 'race-archived-db'
+    const currentRaceRef = 'N9-CRR00-00001'
+    const archivedRaceRef = 'N9-ARCH0-00002'
     const actualStartTime = new Date('2026-03-19T11:00:00.000Z')
     const actualEndTime = new Date('2026-03-19T11:00:20.000Z')
 
     await raceRepository.upsertSeededRace({
       raceId: currentRaceId,
+      raceRef: currentRaceRef,
       seed: 'seed-current',
       checksum: 'checksum-current',
       config: { trackLength: 1000, finishRatio: 1, seed: 'seed-current' },
@@ -63,6 +70,7 @@ describeIfDb('raceReadService integration', () => {
 
     await raceRepository.upsertSeededRace({
       raceId: archivedRaceId,
+      raceRef: archivedRaceRef,
       seed: 'seed-archived',
       checksum: 'checksum-archived',
       config: { trackLength: 1000, finishRatio: 1, seed: 'seed-archived' },
@@ -174,7 +182,7 @@ describeIfDb('raceReadService integration', () => {
 
     const current = await service.getCurrentRaceSummary()
     expect(current).toMatchObject({
-      raceId: currentRaceId,
+      raceRef: currentRaceRef,
       checksum: 'checksum-current',
       persistenceStatus: 'pending',
       lifecycleStatus: 'seeded',
@@ -182,7 +190,7 @@ describeIfDb('raceReadService integration', () => {
 
     const previous = await service.getPreviousRaceSummary()
     expect(previous).toMatchObject({
-      raceId: archivedRaceId,
+      raceRef: archivedRaceRef,
       winnerId: 'horse-1',
       checksum: 'checksum-archived',
       lifecycleStatus: 'archived',
@@ -191,11 +199,11 @@ describeIfDb('raceReadService integration', () => {
 
     const history = await service.getRaceHistory(10)
     expect(history).toHaveLength(1)
-    expect(history[0]).toMatchObject({ raceId: archivedRaceId })
+    expect(history[0]).toMatchObject({ raceRef: archivedRaceRef })
 
-    const results = await service.getRaceResults(archivedRaceId)
+    const results = await service.getRaceResults(archivedRaceRef)
     expect(results).toEqual({
-      raceId: archivedRaceId,
+      raceRef: archivedRaceRef,
       timestampUtc: actualEndTime.toISOString(),
       winnerId: 'horse-1',
       finishOrder: ['horse-1', 'horse-2'],
@@ -209,19 +217,19 @@ describeIfDb('raceReadService integration', () => {
       placements: ['horse-1', 'horse-2'],
     })
 
-    const timeline = await service.getTimeline(archivedRaceId)
+    const timeline = await service.getTimeline(archivedRaceRef)
     expect(timeline).toEqual([
       { tick: 5, events: [{ id: 'boost', instanceId: 'evt-1' }] },
       { tick: 9, events: [{ id: 'slow', instanceId: 'evt-2' }] },
     ])
 
-    const finalTicks = await service.getFinalTicks(archivedRaceId)
+    const finalTicks = await service.getFinalTicks(archivedRaceRef)
     expect(finalTicks).toEqual([
       { tickIndex: 0, positions: [10, 8] },
       { tickIndex: 1, positions: [25, 20] },
     ])
 
-    const rawTicks = await service.getRawTicks(archivedRaceId)
+    const rawTicks = await service.getRawTicks(archivedRaceRef)
     expect(rawTicks).toEqual([
       { timestampOffsetMs: 0, positions: [{ horseId: 'horse-1', distance: 10 }] },
       { timestampOffsetMs: 50, positions: [{ horseId: 'horse-1', distance: 25 }] },
@@ -236,5 +244,45 @@ describeIfDb('raceReadService integration', () => {
     ])
 
     await fs.rm(tmpArtifactsDir, { recursive: true, force: true })
+  })
+
+  it('preserves mappings, regenerates collisions, and leaves legacy refs null', async () => {
+    const firstRef = 'N9-7K3M2-Q8D4X'
+    await expect(
+      raceRepository.upsertSeededRace({
+        raceId: 'race-private-1',
+        raceRef: firstRef,
+        seed: 'seed-1',
+        config: {},
+      }),
+    ).resolves.toBe(firstRef)
+
+    await expect(
+      raceRepository.upsertSeededRace({
+        raceId: 'race-private-1',
+        raceRef: 'N9-9BCDE-FGHJK',
+        seed: 'seed-1',
+        config: {},
+      }),
+    ).resolves.toBe(firstRef)
+
+    const collisionReplacement = await raceRepository.upsertSeededRace({
+      raceId: 'race-private-2',
+      raceRef: firstRef,
+      seed: 'seed-2',
+      config: {},
+    })
+    expect(collisionReplacement).toMatch(
+      /^N9-[0-9A-HJKMNP-TV-Z]{5}-[0-9A-HJKMNP-TV-Z]{5}$/,
+    )
+    expect(collisionReplacement).not.toBe(firstRef)
+
+    await raceRepository.upsertSeededRace({
+      raceId: 'race-legacy',
+      raceRef: null,
+      seed: 'legacy-seed',
+      config: {},
+    })
+    expect((await raceRepository.findRaceById('race-legacy'))?.raceRef).toBeNull()
   })
 })
