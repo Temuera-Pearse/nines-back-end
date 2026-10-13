@@ -41,6 +41,8 @@ export interface Race {
   winner?: Horse
   placements: Horse[]
   lastBroadcastedTick: number
+  /** Process-local durable completion gate; never serialized. */
+  completionState?: 'persisting' | 'failed' | 'completed'
 }
 
 export interface LiveRaceEvent {
@@ -103,6 +105,9 @@ export type WebSocketMessage =
       horseOrder: string[]
       config: RaceConfig
       currentTickIndex: number
+      bettingOpensAt?: string
+      bettingClosesAt?: string
+      phase?: import('./stateMachine.js').RacePhase
     }
   | {
       type: 'race:start'
@@ -203,6 +208,9 @@ export interface PrecomputedRace {
   raceId: string
   /** Public, non-derivable race reference. */
   raceRef: string
+  /** Authoritative W2 wagering window when lifecycle delivery is enabled. */
+  bettingOpensAt?: string
+  bettingClosesAt?: string
   config: RaceConfig
   horses: HorseSeed[]
   ticks: PrecomputedTick[]

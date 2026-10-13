@@ -7,6 +7,7 @@ import {
 } from './engineLoop.js'
 import { getLeaderRole } from '../leader/elector.js'
 import { logEvent } from '../utils/logEvent.js'
+import { activeRaces } from './activeRaceMemory.js'
 import {
   recordEngineError,
   recordLifecycleTickDrift,
@@ -32,7 +33,13 @@ function reconcileEngine(phase: string): void {
   const cur = RaceState.getCurrentRace()
   const shouldRun =
     shouldDriveLifecycle() && phase === 'race_running' && cur?.isActive === true
-  if (shouldRun && !isRunning()) startEngine()
+  if (shouldRun && !isRunning()) {
+    const nextTickIndex = Math.max(
+      0,
+      (activeRaces.get(cur!.raceId)?.currentTickIndex ?? -1) + 1,
+    )
+    startEngine(nextTickIndex)
+  }
   if (!shouldRun && isRunning()) stopEngine()
 }
 
@@ -70,17 +77,20 @@ export function startCycleClock(): void {
     logEvent('cycle:phase', { phase })
   })
 
-  const tick = () => {
+  let tickInFlight = false
+  const tick = async () => {
     if (!running) return
+    if (tickInFlight) return
     if (!shouldDriveLifecycle()) {
       if (isRunning()) stopEngine()
       return
     }
+    tickInFlight = true
     reconcileEngine(sm.state)
     try {
       const drift = Date.now() % 1000
       recordLifecycleTickDrift(Math.min(drift, 1000 - drift))
-      sm.tick()
+      await sm.tick()
     } catch (e: any) {
       recordEngineError(e)
       logEvent('cycle:tick-error', {
@@ -88,13 +98,15 @@ export function startCycleClock(): void {
         error: e?.message ?? String(e),
         stack: e?.stack ? String(e.stack) : undefined,
       })
+    } finally {
+      tickInFlight = false
     }
   }
 
   // Fire once immediately so the state machine catches up to the current UTC second,
   // then schedule all subsequent ticks precisely on UTC-second boundaries.
-  tick()
-  scheduleNextAlignedTick(tick)
+  void tick()
+  scheduleNextAlignedTick(() => { void tick() })
 }
 
 export function stopCycleClock(): void {

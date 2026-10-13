@@ -21,14 +21,25 @@ import { startEdgeSubscriber } from './broadcast/edgeSubscriber.js'
 import { startLeaderElection } from './leader/elector.js'
 import { rateLimit } from './utils/rateLimit.js'
 import helmet from 'helmet'
-import { closePool, verifyPool } from './db/pool.js'
+import { closePool, isDatabaseConfigured, verifyPool } from './db/pool.js'
 import {
   isSimulationMode,
   simulationModeStartupMessage,
 } from './runtime/simulationMode.js'
+import { loadRaceLifecycleDeliveryConfig } from './financial/raceLifecycleConfig.js'
+import { NinesFinancialRaceLifecycleClient } from './financial/NinesFinancialRaceLifecycleClient.js'
+import { PgRaceLifecycleOutboxRepository, RaceLifecycleDeliveryWorker } from './financial/raceLifecycleOutbox.js'
+import { NinesFinancialRaceResultClient } from './financial/NinesFinancialRaceResultClient.js'
+import { PgRaceResultOutboxRepository, RaceResultDeliveryWorker } from './financial/raceResultOutbox.js'
+import { createPlayerWagerRouter } from './api/playerWagerRoutes.js'
+import { NinesFinancialWagerClient } from './financial/NinesFinancialWagerClient.js'
+import { loadNinesFinancialWagerClientOptions } from './financial/ninesFinancialWagerConfig.js'
+import { getPool } from './db/pool.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
+let raceLifecycleWorker: RaceLifecycleDeliveryWorker | null = null
+let raceResultWorker: RaceResultDeliveryWorker | null = null
 
 // Middleware
 app.use(express.json())
@@ -46,6 +57,27 @@ app.use(rateLimit({ windowMs: 10000, max: 200 }))
 app.use('/race', raceRoutes)
 app.use('/internal/race-authority', internalRaceAuthorityRoutes)
 app.use('/admin', raceDataPersistenceAdminRoutes)
+
+if (process.env.NINES_API_PLAYER_WAGER_ENABLED === '1') {
+  const environment = process.env.NODE_ENV ?? 'development'
+  if (environment !== 'development' && environment !== 'test' && environment !== 'production') {
+    throw new Error('NODE_ENV must be development, test, or production')
+  }
+  const apiKeyId = process.env.NINES_API_AUTH_KEY_ID?.trim()
+  const apiSecret = process.env.NINES_API_AUTH_HMAC_SECRET?.trim()
+  if (!apiKeyId || !apiSecret || apiSecret.length < 32) {
+    throw new Error('Player wager gateway requires NINES_API_AUTH_KEY_ID and NINES_API_AUTH_HMAC_SECRET')
+  }
+  app.use(createPlayerWagerRouter({
+    environment,
+    apiKeyId,
+    apiSecret,
+    database: getPool(),
+    financialClient: new NinesFinancialWagerClient(
+      loadNinesFinancialWagerClientOptions(environment),
+    ),
+  }))
+}
 
 // Health check
 app.get('/health', (req, res) => {
@@ -90,21 +122,50 @@ if (isSimulationMode()) {
   console.warn(simulationModeStartupMessage())
 }
 
-// Crash-safe restart recovery (idempotent)
-runRestartRecovery()
-
-// Start watchdog
-startWatchdog()
-startRaceAuthorityObservability()
-
-// Start lifecycle driver (ticks RaceStateMachine; starts engine only during race_running)
-startCycleClock()
-
 async function startServer(): Promise<void> {
   try {
     await verifyPool()
+    // Recovery is a startup barrier: no lifecycle tick or engine tick may run
+    // until every unresolved durable race has been reconciled.
+    await runRestartRecovery()
+
+    const environment = process.env.NODE_ENV ?? 'development'
+    if (environment !== 'development' && environment !== 'test' && environment !== 'production') {
+      throw new Error('NODE_ENV must be development, test, or production')
+    }
+    const lifecycleConfig = loadRaceLifecycleDeliveryConfig(environment)
+    if (lifecycleConfig.enabled) {
+      if (!isDatabaseConfigured() || !lifecycleConfig.baseUrl || !lifecycleConfig.keyId ||
+          !lifecycleConfig.secret) {
+        throw new Error('Race lifecycle delivery requires durable race persistence and Financial credentials')
+      }
+      raceLifecycleWorker = new RaceLifecycleDeliveryWorker(
+        new PgRaceLifecycleOutboxRepository(),
+        new NinesFinancialRaceLifecycleClient({
+          baseUrl: lifecycleConfig.baseUrl, environment, keyId: lifecycleConfig.keyId,
+          secret: lifecycleConfig.secret, timeoutMs: lifecycleConfig.timeoutMs,
+          maxAttempts: lifecycleConfig.maxAttempts,
+        }),
+        lifecycleConfig.pollIntervalMs,
+      )
+      raceLifecycleWorker.start()
+      raceResultWorker = new RaceResultDeliveryWorker(
+        new PgRaceResultOutboxRepository(),
+        new NinesFinancialRaceResultClient({
+          baseUrl: lifecycleConfig.baseUrl, environment, keyId: lifecycleConfig.keyId,
+          secret: lifecycleConfig.secret, timeoutMs: lifecycleConfig.timeoutMs,
+          maxAttempts: lifecycleConfig.maxAttempts,
+        }),
+        lifecycleConfig.pollIntervalMs,
+      )
+      raceResultWorker.start()
+    }
+
+    startWatchdog()
+    startRaceAuthorityObservability()
+    startCycleClock()
   } catch (e) {
-    console.error(`Database verification failed: ${String(e)}`)
+    console.error(`Server startup verification failed: ${String(e)}`)
     process.exit(1)
   }
 
@@ -134,6 +195,8 @@ process.on('SIGTERM', () => {
   stopWatchdog()
   stopCycleClock()
   stopEngine()
+  raceLifecycleWorker?.stop()
+  raceResultWorker?.stop()
   MasterTimeline.shutdown()
   server.close(() => {
     void closePool().finally(() => {
@@ -148,6 +211,8 @@ process.on('SIGINT', () => {
   stopWatchdog()
   stopCycleClock()
   stopEngine()
+  raceLifecycleWorker?.stop()
+  raceResultWorker?.stop()
   MasterTimeline.shutdown()
   server.close(() => {
     void closePool().finally(() => {

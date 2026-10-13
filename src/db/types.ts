@@ -36,6 +36,15 @@ export interface RaceRecord {
   updatedAt: Date
 }
 
+/** Durable evidence needed to reconstruct an unresolved race after restart. */
+export interface RecoverableRaceRecord extends RaceRecord {
+  recoveryStartTime: Date | null
+  bettingOpensAt: string | null
+  bettingClosesAt: string | null
+  hasLifecycleOpen: boolean
+  hasLifecycleClose: boolean
+}
+
 export interface UpsertSeededRaceInput {
   raceId: string
   raceRef: string | null
@@ -44,6 +53,7 @@ export interface UpsertSeededRaceInput {
   checksum?: string | null
   config: Record<string, unknown>
   eventsCount?: number
+  lifecycleEvents?: readonly import('../financial/raceLifecycleContract.js').NinesRaceLifecycleEventV1[]
 }
 
 export interface MarkRaceFinishedInput {

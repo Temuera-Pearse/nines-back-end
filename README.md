@@ -130,7 +130,8 @@ working. It deliberately disables normal-runtime write paths:
 - Local `data/races` summaries, ticks, timelines, precomputed paths, and
   `UNSAVED.flag` markers are not written.
 - S3 artifact writes are skipped.
-- Financial service calls remain absent from this race-authority service.
+- Authenticated Financial wager submission is available as a library client,
+  but simulation mode does not invoke it automatically.
 
 On restart, simulation mode regenerates in-memory race state and lets the public
 race loop continue from memory. This mode is for demos and alpha public race-loop
@@ -147,6 +148,67 @@ records.
 - `src/services`: race read/artifact loading services only.
 - `src/db`: race metadata and race artifact repositories only.
 - `src/metrics`: internal engine metrics used by the runtime.
+- `src/financial`: authenticated NINES wager and race-lifecycle contracts, clients, and durable delivery.
+
+## Stage W1 Financial wager client
+
+`NinesFinancialWagerClient` sends the immutable `NinesPlaceBetCommandV1` to
+Financial with HMAC method/path/environment/body binding. Each retry uses a new
+transport nonce and signature while retaining `betId`, stake, and economic
+idempotency identity. Production configuration requires
+`NINES_FINANCIAL_BASE_URL` (HTTPS), `NINES_FINANCIAL_AUTH_KEY_ID`, and
+`NINES_FINANCIAL_AUTH_HMAC_SECRET`; timeout and attempts default to 3000 ms and
+2 respectively.
+
+The contract maps the private backend `race_id` to Financial `raceId`, making
+it the economic primary key. Public `race_ref` is display/correlation evidence
+only. The versioned player assertion must be created from an already
+authenticated upstream player context and binds its subject to `playerId`.
+W1 does not add a public betting route or durable backend command table: the
+caller owns the stable command identity, and lost synchronous responses are
+recovered by resubmitting the same command.
+
+## Stage W2 race lifecycle delivery
+
+When `NINES_FINANCIAL_RACE_LIFECYCLE_ENABLED=true`, seeding a durably persisted
+race atomically records immutable `nines_race_opened.v1` and scheduled
+`nines_race_betting_closed.v1` events in `race_lifecycle_outbox`. The open event
+is immediately eligible; the close event becomes eligible at the authoritative
+race-start/betting-close timestamp. Delivery retries preserve the event body and
+economic identity while renewing the HMAC timestamp and transport nonce.
+
+The backend `raceId` is the Financial economic identity, `raceRef` remains the
+public reference, and each horse ID maps directly to the Financial selection ID.
+The policy snapshot requires an explicit `NINES_RACE_HOUSE_TAKE_BPS`; there is
+no inferred production default. Durable delivery also requires
+`NINES_RACE_DATA_PERSISTENCE_ENABLED=true`, `DATABASE_URL`,
+`NINES_FINANCIAL_BASE_URL`, `NINES_FINANCIAL_AUTH_KEY_ID`, and
+`NINES_FINANCIAL_AUTH_HMAC_SECRET`. Optional poll, timeout, and attempt settings
+use the `NINES_FINANCIAL_RACE_LIFECYCLE_*` prefix.
+
+Authenticated browser wagers enter through nines-api and reach the narrow
+`POST /internal/v1/player-wagers` gateway. Enable it with
+`NINES_API_PLAYER_WAGER_ENABLED=1` and configure the dedicated
+`NINES_API_AUTH_KEY_ID` / `NINES_API_AUTH_HMAC_SECRET` pair. The gateway maps
+the public race reference to the private race identity; it never accepts a
+browser-supplied private race ID. Apply migration
+`005_player_wager_gateway.sql` before enabling it.
+
+## Stage W3 authoritative result delivery
+
+For W2-managed races, durable race completion and insertion of an immutable
+`nines_race_completed.v1` event into `race_result_outbox` occur in the same
+PostgreSQL transaction. The result is derived from the persisted W2 close
+evidence and the backend's actual winner, finish order, completion timestamp,
+and race checksum. A deterministic result ID and canonical evidence hash remain
+stable across retries and restarts.
+
+The result worker reuses the W2 Financial delivery configuration and HMAC
+credentials. It sends `POST /internal/v1/race-results` without holding a
+database transaction, uses a fresh timestamp and nonce for every HTTP attempt,
+and records the durable Financial settlement acknowledgement. Retryable
+outages/timeouts remain pending; a conflict is retained as a terminal delivery
+failure for operator investigation. Production delivery requires HTTPS.
 
 ## Run
 

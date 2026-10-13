@@ -1,6 +1,5 @@
 import { RaceState } from '../race/raceState.js'
 import { MasterTimeline } from './masterTimeline.js'
-import { releaseRace } from '../race/cleanup.js'
 import { logEvent } from '../utils/logEvent.js'
 import { activeRaces } from '../race/activeRaceMemory.js'
 import { isRunning as isEngineRunning } from '../race/engineLoop.js'

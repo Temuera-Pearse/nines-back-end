@@ -251,6 +251,9 @@ export class RaceWebSocketServer {
             horseOrder: pre.horses.map((h) => h.id),
             config: sanitizeRaceConfig(pre.config),
             currentTickIndex,
+            bettingOpensAt: pre.bettingOpensAt,
+            bettingClosesAt: pre.bettingClosesAt,
+            phase: RaceState.getStateMachine().getPhaseAndSecond().phase,
           }),
         )
 

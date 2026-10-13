@@ -124,6 +124,10 @@ router.get('/current', requireApiToken, async (req, res) => {
       finishLine: pre.finishLine,
       startTime: pre.startTime,
       endTime: pre.endTime,
+      phase: RaceState.getStateMachine().getPhaseAndSecond().phase,
+      bettingOpensAt: pre.bettingOpensAt,
+      bettingClosesAt: pre.bettingClosesAt,
+      entrants: pre.horses.map((horse) => ({ id: horse.id, name: horse.name })),
     })
   }
 

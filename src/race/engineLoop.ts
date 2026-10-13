@@ -97,14 +97,18 @@ function loop() {
   }
 }
 
-export function start(): void {
+export function start(initialTickIndex = 0): void {
   if (running) return
   running = true
-  tickCount = 0
+  tickCount = Math.max(0, Math.floor(initialTickIndex))
   lastTickTime = performance.now()
   nextTickTime = lastTickTime // start immediately
   engineMetrics.startRace(TICK_INTERVAL)
-  logEvent('engine:start', { hz: TICK_RATE, intervalMs: TICK_INTERVAL })
+  logEvent('engine:start', {
+    hz: TICK_RATE,
+    intervalMs: TICK_INTERVAL,
+    initialTickIndex: tickCount,
+  })
   timerRef = setTimeout(loop, 0)
 }
 

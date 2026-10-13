@@ -125,6 +125,10 @@ describe('raceRoutes endpoints', () => {
       finishLine: 123,
       startTime: 1000,
       endTime: 2000,
+      horses: [{ id: 'horse-1', name: 'One' }],
+    } as any)
+    vi.spyOn(RaceState, 'getStateMachine').mockReturnValue({
+      getPhaseAndSecond: () => ({ phase: 'results_showing', second: 55 }),
     } as any)
 
     const res = await request(makeApp()).get('/race/current')
@@ -135,6 +139,8 @@ describe('raceRoutes endpoints', () => {
       finishLine: 123,
       startTime: 1000,
       endTime: 2000,
+      phase: 'results_showing',
+      entrants: [{ id: 'horse-1', name: 'One' }],
     })
   })
 

@@ -93,6 +93,11 @@ export class RaceStateMachine {
     return this.state === state
   }
 
+  /** Restore a database-verified phase before the lifecycle clock subscribes. */
+  restoreForRecovery(state: RacePhase): void {
+    this.state = state
+  }
+
   // Subscription to state changes and tick updates
   subscribe(fn: Subscriber): () => void {
     const handler = ({
@@ -116,7 +121,7 @@ export class RaceStateMachine {
 
   // Advance the cycle by 1 second (call every 1000ms)
   // Emits state changes at boundary seconds and per-second tick data during race_running.
-  tick(): void {
+  async tick(): Promise<void> {
     // Snap to actual UTC second — eliminates drift from timer jitter.
     const utcSec = new Date().getUTCSeconds()
     // Deduplicate: if the aligned timer fires 1ms early then again at the boundary,
@@ -124,6 +129,16 @@ export class RaceStateMachine {
     if (utcSec === this.lastProcessedUTCSec) return
     this.lastProcessedUTCSec = utcSec
     this.currentSecond = utcSec
+
+    // Durable completion owns the lifecycle boundary. Do not enter results,
+    // clear, archive, or seed another race until its result transaction commits.
+    const runtimeRace = RaceState.getCurrentRace()
+    if (
+      runtimeRace?.completionState === 'persisting' ||
+      runtimeRace?.completionState === 'failed'
+    ) {
+      return
+    }
 
     // Determine phase by currentSecond and auto-transition as needed
     if (this.inRange(SECS.idleStart, SECS.idleEnd)) {
@@ -135,13 +150,28 @@ export class RaceStateMachine {
         const existing = RaceState.getPrecomputedRace()
         if (existing?.raceId) {
           try {
-            releaseRace(existing.raceId)
+            await releaseRace(existing.raceId)
           } catch {
-            // best-effort
+            // The durable race remains authoritative and process-local state
+            // stays available for a later cleanup retry.
+            return
           }
         }
 
         ensurePrecomputedRace()
+      } else {
+        // Startup recovery may restore a completed result after the :00
+        // boundary. Archive it on the next idle tick, but never clear it until
+        // the database transaction succeeds.
+        const existing = RaceState.getPrecomputedRace()
+        if (existing?.authoritativeFinish) {
+          try {
+            await releaseRace(existing.raceId)
+          } catch {
+            return
+          }
+          ensurePrecomputedRace()
+        }
       }
 
       if (this.state !== 'idle' && this.currentSecond <= SECS.idleEnd) {

@@ -5,11 +5,12 @@ import { join } from 'path'
 import { fileURLToPath } from 'url'
 import { closePool, getPool, verifyPool } from '../db/pool.js'
 import { PgRaceRepository } from '../db/raceRepository.js'
+import { getDisposablePostgresTestUrl } from '../testSupport/disposablePostgres.js'
 import { PgRaceArtifactRepository } from '../db/raceArtifactRepository.js'
 import { DefaultRaceReadService } from './raceReadService.js'
 import { RaceState } from '../race/raceState.js'
 
-const testDatabaseUrl = process.env.TEST_DATABASE_URL
+const testDatabaseUrl = getDisposablePostgresTestUrl()
 const describeIfDb = testDatabaseUrl ? describe : describe.skip
 
 const raceRepository = new PgRaceRepository()
@@ -31,7 +32,7 @@ describeIfDb('raceReadService integration', () => {
   let tmpArtifactsDir = ''
 
   beforeAll(async () => {
-    process.env.DATABASE_URL = testDatabaseUrl
+    process.env.DATABASE_URL = testDatabaseUrl!
     process.env.NINES_RACE_DATA_PERSISTENCE_ENABLED = 'true'
     await verifyPool()
     await applyMigrations()

@@ -17,6 +17,7 @@ import {
   seedPrecomputedRace,
   startPrecomputedRace,
   streamPrecomputedTickAt,
+  waitForRaceCompletion,
 } from './raceEngine.js'
 import { hashStringToInt } from './rng.js'
 import { RaceState } from './raceState.js'
@@ -213,6 +214,8 @@ describe('opaque public race identity', () => {
     )
     expect(rejectedFrames.join('')).toContain('invalid raceRef')
     streamPrecomputedTickAt(second.ticks.length - 1)
+    streamPrecomputedTickAt(second.ticks.length - 1)
+    await waitForRaceCompletion(secondId)
 
     const scopedMessages = broadcasts.filter((message: any) => {
       return message?.raceRef === secondRef
@@ -262,6 +265,8 @@ describe('opaque public race identity', () => {
     expect(finishSpy).toHaveBeenCalledWith(
       expect.objectContaining({ raceId: secondId }),
     )
+    expect(scopedMessages.filter((message) => message.type === 'race:finish'))
+      .toHaveLength(1)
 
     const ordinaryLogs = JSON.stringify(logSpy.mock.calls)
     expect(ordinaryLogs).not.toContain(privateSeed)
